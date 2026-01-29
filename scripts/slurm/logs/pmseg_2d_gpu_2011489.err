@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "/project/6106383/pirie03/ProstateMicroSeg/scripts/train_2d_baseline.py", line 12, in <module>
-    from src.data.dataset_2d import MicroUS2DSliceDataset
-  File "/project/6106383/pirie03/ProstateMicroSeg/src/data/dataset_2d.py", line 7, in <module>
-    import SimpleITK as sitk
-ModuleNotFoundError: No module named 'SimpleITK'
