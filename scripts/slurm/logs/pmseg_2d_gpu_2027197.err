@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "/project/6106383/pirie03/ProstateMicroSeg/scripts/train_2d_baseline.py", line 192, in <module>
+    main()
+  File "/project/6106383/pirie03/ProstateMicroSeg/scripts/train_2d_baseline.py", line 73, in main
+    train_ds = MicroUS2DSliceDataset(
+               ^^^^^^^^^^^^^^^^^^^^^^
+  File "/project/6106383/pirie03/ProstateMicroSeg/src/data/dataset_2d.py", line 114, in __init__
+    self.index: List[Tuple[str, int]] = self._build_index()
+                                        ^^^^^^^^^^^^^^^^^^^
+  File "/project/6106383/pirie03/ProstateMicroSeg/src/data/dataset_2d.py", line 163, in _build_index
+    img_path, _ = self._case_paths(cid)
+                  ^^^^^^^^^^^^^^^^^^^^^
+  File "/project/6106383/pirie03/ProstateMicroSeg/src/data/dataset_2d.py", line 133, in _case_paths
+    raise FileNotFoundError(f"Missing image: {img_path}")
+FileNotFoundError: Missing image: /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/dataset/processed/Dataset120_MicroUSProstate/imagesTr/microUS_01_0000.nii.gz

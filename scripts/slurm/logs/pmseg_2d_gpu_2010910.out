@@ -1,0 +1,102 @@
+job started: Tue Jan 27 03:24:30 PM EST 2026
+hostname: kn103
+pwd: /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/scripts/slurm
+Device: cuda
+GPU: NVIDIA L40S
+CUDA Memory: 47.68 GB
+Train slices: 1766 | Val slices: 386
+Target HW: (896, 1408) | Batch size: 2 | LR: 0.0001 | Epochs: 1
+DataLoader: num_workers=2, pin_memory=True
+Starting training...
+[Epoch 1] Starting training loop...
+[Epoch 1] step 10/883 | train_loss=0.9144
+[Epoch 1] step 20/883 | train_loss=0.8206
+[Epoch 1] step 30/883 | train_loss=0.7050
+[Epoch 1] step 40/883 | train_loss=0.7128
+[Epoch 1] step 50/883 | train_loss=0.5884
+[Epoch 1] step 60/883 | train_loss=0.6628
+[Epoch 1] step 70/883 | train_loss=0.6635
+[Epoch 1] step 80/883 | train_loss=0.6263
+[Epoch 1] step 90/883 | train_loss=0.6379
+[Epoch 1] step 100/883 | train_loss=0.5060
+[Epoch 1] step 110/883 | train_loss=0.6616
+[Epoch 1] step 120/883 | train_loss=0.6014
+[Epoch 1] step 130/883 | train_loss=0.5136
+[Epoch 1] step 140/883 | train_loss=0.4666
+[Epoch 1] step 150/883 | train_loss=0.5205
+[Epoch 1] step 160/883 | train_loss=0.5046
+[Epoch 1] step 170/883 | train_loss=0.5537
+[Epoch 1] step 180/883 | train_loss=0.4612
+[Epoch 1] step 190/883 | train_loss=0.5286
+[Epoch 1] step 200/883 | train_loss=0.4954
+[Epoch 1] step 210/883 | train_loss=0.4912
+[Epoch 1] step 220/883 | train_loss=0.4666
+[Epoch 1] step 230/883 | train_loss=0.5082
+[Epoch 1] step 240/883 | train_loss=0.5021
+[Epoch 1] step 250/883 | train_loss=0.4398
+[Epoch 1] step 260/883 | train_loss=0.3962
+[Epoch 1] step 270/883 | train_loss=0.4738
+[Epoch 1] step 280/883 | train_loss=0.4508
+[Epoch 1] step 290/883 | train_loss=0.4783
+[Epoch 1] step 300/883 | train_loss=0.4959
+[Epoch 1] step 310/883 | train_loss=0.4665
+[Epoch 1] step 320/883 | train_loss=0.4177
+[Epoch 1] step 330/883 | train_loss=0.4256
+[Epoch 1] step 340/883 | train_loss=0.4910
+[Epoch 1] step 350/883 | train_loss=0.4466
+[Epoch 1] step 360/883 | train_loss=0.4865
+[Epoch 1] step 370/883 | train_loss=0.4166
+[Epoch 1] step 380/883 | train_loss=0.3939
+[Epoch 1] step 390/883 | train_loss=0.3700
+[Epoch 1] step 400/883 | train_loss=0.3945
+[Epoch 1] step 410/883 | train_loss=0.3883
+[Epoch 1] step 420/883 | train_loss=0.3956
+[Epoch 1] step 430/883 | train_loss=0.4205
+[Epoch 1] step 440/883 | train_loss=0.4053
+[Epoch 1] step 450/883 | train_loss=0.3903
+[Epoch 1] step 460/883 | train_loss=0.3906
+[Epoch 1] step 470/883 | train_loss=0.3778
+[Epoch 1] step 480/883 | train_loss=0.3476
+[Epoch 1] step 490/883 | train_loss=0.4023
+[Epoch 1] step 500/883 | train_loss=0.3895
+[Epoch 1] step 510/883 | train_loss=0.3849
+[Epoch 1] step 520/883 | train_loss=0.4355
+[Epoch 1] step 530/883 | train_loss=0.3588
+[Epoch 1] step 540/883 | train_loss=0.3972
+[Epoch 1] step 550/883 | train_loss=0.4185
+[Epoch 1] step 560/883 | train_loss=0.4343
+[Epoch 1] step 570/883 | train_loss=0.4048
+[Epoch 1] step 580/883 | train_loss=0.3782
+[Epoch 1] step 590/883 | train_loss=0.3731
+[Epoch 1] step 600/883 | train_loss=0.3919
+[Epoch 1] step 610/883 | train_loss=0.3984
+[Epoch 1] step 620/883 | train_loss=0.4053
+[Epoch 1] step 630/883 | train_loss=0.3585
+[Epoch 1] step 640/883 | train_loss=0.3677
+[Epoch 1] step 650/883 | train_loss=0.4302
+[Epoch 1] step 660/883 | train_loss=0.3716
+[Epoch 1] step 670/883 | train_loss=0.3842
+[Epoch 1] step 680/883 | train_loss=0.3597
+[Epoch 1] step 690/883 | train_loss=0.3502
+[Epoch 1] step 700/883 | train_loss=0.3190
+[Epoch 1] step 710/883 | train_loss=0.3976
+[Epoch 1] step 720/883 | train_loss=0.3610
+[Epoch 1] step 730/883 | train_loss=0.3504
+[Epoch 1] step 740/883 | train_loss=0.3804
+[Epoch 1] step 750/883 | train_loss=0.3535
+[Epoch 1] step 760/883 | train_loss=0.3577
+[Epoch 1] step 770/883 | train_loss=0.3828
+[Epoch 1] step 780/883 | train_loss=0.3401
+[Epoch 1] step 790/883 | train_loss=0.3472
+[Epoch 1] step 800/883 | train_loss=0.3234
+[Epoch 1] step 810/883 | train_loss=0.3444
+[Epoch 1] step 820/883 | train_loss=0.3063
+[Epoch 1] step 830/883 | train_loss=0.3425
+[Epoch 1] step 840/883 | train_loss=0.3413
+[Epoch 1] step 850/883 | train_loss=0.3644
+[Epoch 1] step 860/883 | train_loss=0.3538
+[Epoch 1] step 870/883 | train_loss=0.3419
+[Epoch 1] step 880/883 | train_loss=0.3173
+[Epoch 1] Starting validation...
+[Epoch 1] VAL Dice=0.6555
+job finished: Tue Jan 27 03:55:17 PM EST 2026

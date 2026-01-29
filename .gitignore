@@ -1,0 +1,19 @@
+# data
+dataset/raw/
+dataset/processed/
+
+# outputs
+runs/
+checkpoints/
+*.pt
+*.pth
+
+# python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# logs
+slurm-*.out
+*.log
