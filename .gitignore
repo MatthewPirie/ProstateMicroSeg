@@ -17,3 +17,8 @@ venv/
 # logs
 slurm-*.out
 *.log
+
+# slurm log dirs + stderr/stdout
+scripts/slurm/logs/
+*.out
+*.err
