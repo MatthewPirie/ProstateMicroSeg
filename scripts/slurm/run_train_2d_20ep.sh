@@ -25,7 +25,7 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 echo "starting python... $(date)"
 python -u scripts/run_train_2d.py \
-  --epochs 250 \
+  --epochs 50 \
   --num_workers 4 \
   --log_every 100
 

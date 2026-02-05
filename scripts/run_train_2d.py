@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # allow: from src...
 
 import argparse
@@ -13,14 +14,15 @@ from datetime import datetime
 import time
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from src.data.dataset_2d import MicroUS2DSliceDataset
+from src.data.samplers_2d import OversampleForegroundBatchSampler
 from src.models.monai_unet_2d import build_monai_unet_2d
 from src.train.trainer_2d import train_one_epoch, validate, save_checkpoint
-from src.utils.metrics import dice_score_from_logits
+from src.train.losses import CompoundBCEDiceLoss
+from src.utils.metrics import dice_soft_from_logits, dice_hard_from_logits
 
 
 def _get_git_commit() -> str:
@@ -34,11 +36,7 @@ def _make_run_dir(base_dir: str, run_name: str) -> Path:
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
 
-    if run_name:
-        run_dir = base / run_name
-    else:
-        run_dir = base / datetime.now().strftime("%Y%m%d_%H%M%S")
-
+    run_dir = (base / run_name) if run_name else (base / datetime.now().strftime("%Y%m%d_%H%M%S"))
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -68,20 +66,25 @@ def main() -> None:
     parser.add_argument("--save_best", action="store_true", default=True, help="Save best checkpoint by val dice")
     parser.add_argument("--no_save_best", action="store_false", dest="save_best", help="Disable saving best checkpoint")
     parser.add_argument("--save_every", type=int, default=0, help="If >0, also save checkpoint every N epochs")
-    parser.add_argument("--resume_ckpt", type=str, default="", help="Path to checkpoint (.pt) to resume from (loads model+optimizer+epoch)")
+    parser.add_argument("--resume_ckpt", type=str, default="",help="Path to checkpoint (.pt) to resume from (loads model+optimizer+epoch)")
+
     # --- training ---
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=3)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--log_every", type=int, default=10)
-    
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--log_every", type=int, default=100)
+
+    # --- loss configuration ---
+    parser.add_argument("--w_bce", type=float, default=1.0)
+    parser.add_argument("--w_dice", type=float, default=1.0)
+    parser.add_argument("--batch_dice", action="store_true", default=True)
+    parser.add_argument("--no_batch_dice", action="store_false", dest="batch_dice")
 
     # --- preprocessing / shape ---
     parser.add_argument("--target_h", type=int, default=896)
     parser.add_argument("--target_w", type=int, default=1408)
     parser.add_argument("--transpose_hw", action="store_true")  # default False unless set
-    parser.add_argument("--only_foreground_slices", action="store_true")
 
     args = parser.parse_args()
 
@@ -89,7 +92,6 @@ def main() -> None:
     run_dir = _make_run_dir(args.runs_dir, args.run_name)
     tb_dir = run_dir / "tb"
     writer = SummaryWriter(log_dir=str(tb_dir))
-
 
     with open(run_dir / "config.json", "w") as f:
         json.dump(vars(args), f, indent=2)
@@ -115,25 +117,39 @@ def main() -> None:
         split="train",
         target_hw=target_hw,
         transpose_hw=args.transpose_hw,
-        only_foreground_slices=args.only_foreground_slices,
+        seed=0,
+        build_fg_index=True,
+        deterministic=False,
     )
+
     val_ds = MicroUS2DSliceDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="val",
         target_hw=target_hw,
         transpose_hw=args.transpose_hw,
-        only_foreground_slices=args.only_foreground_slices,
+        seed=123,
+        build_fg_index=False,
+        deterministic=True,
     )
 
     pin_memory = torch.cuda.is_available() and args.num_workers > 0
+
+    train_batch_sampler = OversampleForegroundBatchSampler(
+        dataset=train_ds,
+        batch_size=args.batch_size,
+        oversample_foreground_percent=0.33,
+        seed=0,
+        drop_last=True,
+    )
+
     train_loader = DataLoader(
         train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
+        batch_sampler=train_batch_sampler,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
     )
+
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
@@ -142,18 +158,25 @@ def main() -> None:
         pin_memory=pin_memory,
     )
 
+
     print(f"Train slices: {len(train_ds)} | Val slices: {len(val_ds)}")
     print(f"Target HW: {target_hw} | Batch size: {args.batch_size} | LR: {args.lr} | Epochs: {args.epochs}")
     print(f"DataLoader: num_workers={args.num_workers}, pin_memory={pin_memory}")
 
-    # ---- model ----
+    # ---- model / loss / optimizer ----
     model = build_monai_unet_2d(in_channels=1, out_channels=1).to(device)
-    criterion = nn.BCEWithLogitsLoss()
+
+    criterion = CompoundBCEDiceLoss(
+        w_bce=args.w_bce,
+        w_dice=args.w_dice,
+        batch_dice=args.batch_dice,
+    ).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # ---- training loop (orchestration) ----
     start_epoch = 1
-    best_val = float("-inf")
+    best_val = float("-inf")  # best val_dice_thr05 so far
 
     # ---- resume (optional) ----
     if args.resume_ckpt:
@@ -163,17 +186,18 @@ def main() -> None:
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 
-        # resume epoch count
         start_epoch = int(ckpt.get("epoch", 0)) + 1
 
-        # if you saved best_val_dice in "extra", restore it
         extra = ckpt.get("extra", {})
-        if isinstance(extra, dict) and "best_val_dice" in extra:
+        if isinstance(extra, dict) and "best_val_dice_thr05" in extra:
+            best_val = float(extra["best_val_dice_thr05"])
+        elif isinstance(extra, dict) and "best_val_dice" in extra:
+            # backward-compat if you used the older key name
             best_val = float(extra["best_val_dice"])
 
         print(f"Resumed from: {ckpt_path}", flush=True)
         print(f"Starting at epoch: {start_epoch}", flush=True)
-        print(f"Current best_val: {best_val}", flush=True)
+        print(f"Current best_val_dice_thr05: {best_val}", flush=True)
 
     metrics_path = run_dir / "metrics.jsonl"
 
@@ -190,24 +214,35 @@ def main() -> None:
             log_every=args.log_every,
             pin_memory=pin_memory,
         )
+
         val_metrics = validate(
             model=model,
             val_loader=val_loader,
+            criterion=criterion,
             device=device,
-            dice_fn=dice_score_from_logits,
+            dice_soft_fn=lambda lg, y: dice_soft_from_logits(lg, y, batch_dice=args.batch_dice),
+            dice_hard_fn=dice_hard_from_logits,
             epoch=epoch,
             pin_memory=pin_memory,
         )
 
-        writer.add_scalar("train/loss", train_metrics["train_loss"], epoch)
-        writer.add_scalar("val/dice", val_metrics["val_dice"], epoch)
+        # minimal tracking: optimization + overfitting + headline metric
+        writer.add_scalar("train/total_loss", train_metrics["train_total_loss"], epoch)
+        writer.add_scalar("val/total_loss", val_metrics["val_total_loss"], epoch)
+        writer.add_scalar("val/dice_thr05", val_metrics["val_dice_thr05"], epoch)
         writer.flush()
 
         epoch_sec = time.time() - t_epoch0
         print(f"[Epoch {epoch}] time_sec={epoch_sec:.1f}", flush=True)
 
         # write one line per epoch
-        record = {"epoch": epoch, "epoch_sec": epoch_sec, **train_metrics, **val_metrics}
+        record = {
+            "epoch": epoch,
+            "epoch_sec": epoch_sec,
+            "train_total_loss": train_metrics["train_total_loss"],
+            "val_total_loss": val_metrics["val_total_loss"],
+            "val_dice_thr05": val_metrics["val_dice_thr05"],
+        }
         with open(metrics_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
@@ -218,20 +253,30 @@ def main() -> None:
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                extra={"best_val_dice": best_val, "train_metrics": train_metrics, "val_metrics": val_metrics, "args": vars(args)},
+                extra={
+                    "best_val_dice_thr05": best_val,
+                    "train_metrics": train_metrics,
+                    "val_metrics": val_metrics,
+                    "args": vars(args),
+                },
             )
 
-        # save best
-        if args.save_best and val_metrics["val_dice"] > best_val:
-            best_val = val_metrics["val_dice"]
+        # save best (based on hard dice at 0.5 threshold)
+        if args.save_best and val_metrics["val_dice_thr05"] > best_val:
+            best_val = val_metrics["val_dice_thr05"]
             save_checkpoint(
                 ckpt_path=run_dir / "checkpoint_best.pt",
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                extra={"best_val_dice": best_val, "train_metrics": train_metrics, "val_metrics": val_metrics, "args": vars(args)},
+                extra={
+                    "best_val_dice_thr05": best_val,
+                    "train_metrics": train_metrics,
+                    "val_metrics": val_metrics,
+                    "args": vars(args),
+                },
             )
-            print(f"[Epoch {epoch}] New best VAL Dice={best_val:.4f} -> saved checkpoint_best.pt")
+            print(f"[Epoch {epoch}] New best VAL Dice(thr=0.5)={best_val:.4f} -> saved checkpoint_best.pt")
 
         # optional periodic save
         if args.save_every and (epoch % args.save_every == 0):

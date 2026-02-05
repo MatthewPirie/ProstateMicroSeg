@@ -9,8 +9,8 @@ def build_monai_unet_2d(
         spatial_dims=2,
         in_channels=in_channels,
         out_channels=out_channels,
-        channels=(32, 64, 128, 256, 512),
-        strides=(2, 2, 2, 2),
+        channels=(32, 64, 128, 256, 512, 512, 512, 512),
+        strides=(2, 2, 2, 2, 2, 2, 2),
         num_res_units=0,
         norm="INSTANCE",
     )
