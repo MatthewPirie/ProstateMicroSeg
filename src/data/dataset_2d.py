@@ -10,8 +10,15 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .transforms_2d import crop_or_pad_2d, pick_random_foreground_center, zscore_normalize
+from .transforms_2d import (
+    zscore_normalize,
+    pick_random_foreground_center,
+    compute_crop_pad_params_2d,
+    apply_crop_pad_2d,
+    center_crop_or_pad_2d,
+)
 
+from .augmentations_2d import get_train_transforms_2d
 
 def read_case_ids(txt_path: Path) -> List[str]:
     case_ids: List[str] = []
@@ -21,45 +28,6 @@ def read_case_ids(txt_path: Path) -> List[str]:
             if line:
                 case_ids.append(line)
     return case_ids
-
-
-def center_crop_or_pad_2d(arr: np.ndarray, target_hw: Tuple[int, int], pad_value: float = 0.0) -> np.ndarray:
-    """
-    Deterministic center crop/pad (for validation).
-    - If larger than target: take centered crop.
-    - If smaller than target: symmetric (center) padding.
-    """
-    assert arr.ndim == 2, f"Expected 2D array, got {arr.ndim}D"
-    th, tw = target_hw
-    h, w = arr.shape
-
-    # Center crop
-    if h > th:
-        top = (h - th) // 2
-        arr = arr[top : top + th, :]
-    if w > tw:
-        left = (w - tw) // 2
-        arr = arr[:, left : left + tw]
-
-    # Center pad
-    h2, w2 = arr.shape
-    pad_h = max(th - h2, 0)
-    pad_w = max(tw - w2, 0)
-
-    pad_top = pad_h // 2
-    pad_bottom = pad_h - pad_top
-    pad_left = pad_w // 2
-    pad_right = pad_w - pad_left
-
-    if pad_h > 0 or pad_w > 0:
-        arr = np.pad(
-            arr,
-            pad_width=((pad_top, pad_bottom), (pad_left, pad_right)),
-            mode="constant",
-            constant_values=pad_value,
-        )
-    return arr
-
 
 @dataclass(frozen=True)
 class SplitSpec:
@@ -95,6 +63,8 @@ class MicroUS2DSliceDataset(Dataset):
         build_fg_index: bool = True,
         fg_threshold: float = 0.5,
         deterministic: bool = False,
+        do_augment: bool = False,
+        augment_seed: int = 0,
     ):
         self.dataset_root = Path(dataset_root)
         self.splits_dir = Path(splits_dir)
@@ -106,6 +76,15 @@ class MicroUS2DSliceDataset(Dataset):
         self.fg_center_jitter = int(fg_center_jitter)
         self.fg_threshold = float(fg_threshold)
         self.deterministic = bool(deterministic)
+
+        # Augmentations: train-only, disabled for deterministic (val)
+        self.do_augment = bool(do_augment) and (self.split == "train") and (not self.deterministic)
+        self.aug = None
+        if self.do_augment:
+            self.aug = get_train_transforms_2d(
+                target_hw=self.target_hw,
+                seed=int(augment_seed),
+            )
 
         split_spec = self._make_split_spec(self.split)
         self.case_ids = split_spec.case_ids
@@ -191,6 +170,19 @@ class MicroUS2DSliceDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, i: Union[int, Tuple[int, bool]]) -> Dict[str, Any]:
+        # Allow sampler to pass (index, force_fg)
+        if isinstance(i, tuple):
+            base_i, force_fg = i
+        else:
+            base_i, force_fg = i, False
+
+        case_id, s = self.index[int(base_i)]
+        img3d, lbl3d = self._load_case(case_id)
+
+        if (not hasattr(self, "_printed_shape")) or (self._printed_shape is False):
+            print(f"[{self.split}] example case {case_id}: img3d shape={img3d.shape}, lbl3d shape={lbl3d.shape}", flush=True)
+            self._printed_shape = True
+
         img2d = img3d[s, :, :]
         lbl2d = lbl3d[s, :, :]
 
@@ -198,32 +190,44 @@ class MicroUS2DSliceDataset(Dataset):
             img2d = img2d.T
             lbl2d = lbl2d.T
 
-        # Normalize BEFORE crop/pad
+        # Normalize BEFORE crop/pad (important)
         img2d = zscore_normalize(img2d)
 
         if self.deterministic:
+            # Validation: deterministic center crop/pad, no FG forcing
             img2d = center_crop_or_pad_2d(img2d, self.target_hw, pad_value=0.0)
             lbl2d = center_crop_or_pad_2d(lbl2d, self.target_hw, pad_value=0.0)
             force_fg = False
         else:
+            # Training: stochastic crop/pad, optional FG centering
             center_yx = None
             if force_fg:
                 center_yx = pick_random_foreground_center(lbl2d, rng=self.rng, thresh=self.fg_threshold)
 
-            img2d = crop_or_pad_2d(
-                img2d, self.target_hw, rng=self.rng,
-                pad_value=0.0, center_yx=center_yx, center_jitter=self.fg_center_jitter
+            # NEW: compute one shared crop/pad plan, then apply to BOTH image and label
+            params = compute_crop_pad_params_2d(
+                in_hw=img2d.shape,
+                target_hw=self.target_hw,
+                rng=self.rng,
+                center_yx=center_yx,
+                center_jitter=self.fg_center_jitter,
             )
-            lbl2d = crop_or_pad_2d(
-                lbl2d, self.target_hw, rng=self.rng,
-                pad_value=0.0, center_yx=center_yx, center_jitter=self.fg_center_jitter
-            )
+            img2d = apply_crop_pad_2d(img2d, params, pad_value=0.0)
+            lbl2d = apply_crop_pad_2d(lbl2d, params, pad_value=0.0)
 
-        # Ensure binary label
+        # Ensure binary label (before MONAI aug)
         lbl2d = (lbl2d > self.fg_threshold).astype(np.float32)
 
+        # Convert to torch tensors (MONAI expects torch tensors)
         img_t = torch.from_numpy(img2d).unsqueeze(0).float()
         lbl_t = torch.from_numpy(lbl2d).unsqueeze(0).float()
+
+        # Apply augmentations (train only, because self.aug=None for val)
+        if self.aug is not None:
+            out = self.aug({"image": img_t, "label": lbl_t})
+            img_t = out["image"]
+            lbl_t = out["label"]
+            lbl_t = (lbl_t > 0.5).float()
 
         return {
             "image": img_t,
@@ -232,3 +236,4 @@ class MicroUS2DSliceDataset(Dataset):
             "slice_idx": torch.tensor(int(s), dtype=torch.int64),
             "force_fg": bool(force_fg),
         }
+

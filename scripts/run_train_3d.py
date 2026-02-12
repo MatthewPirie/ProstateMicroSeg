@@ -1,4 +1,4 @@
-# ProstateMicroSeg/scripts/run_train_2d.py
+# ProstateMicroSeg/scripts/run_train_3d.py
 
 from __future__ import annotations
 
@@ -16,17 +16,14 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from src.data.dataset_2d import MicroUS2DSliceDataset
-from src.data.samplers_2d import OversampleForegroundBatchSampler
-from src.models.monai_unet_2d import build_monai_unet_2d
-from src.train.trainer_2d import train_one_epoch, validate, save_checkpoint
+from src.data.dataset_3d import MicroUS3DVolumeDataset
+from src.data.samplers_3d import OversampleForegroundBatchSampler3D
+from src.models.monai_unet_3d import build_monai_unet_3d
+from src.train.trainer_3d import train_one_epoch, validate, save_checkpoint
 from src.train.losses import CompoundBCEDiceLoss
 from src.utils.metrics import dice_soft_from_logits, dice_hard_from_logits
 
 
-# -------------------------
-# Small helpers
-# -------------------------
 def _get_git_commit() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -37,19 +34,14 @@ def _get_git_commit() -> str:
 def _make_run_dir(base_dir: str, run_name: str) -> Path:
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
-
     run_dir = (base / run_name) if run_name else (base / datetime.now().strftime("%Y%m%d_%H%M%S"))
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
 
-# -------------------------
-# Main
-# -------------------------
 def main() -> None:
-    torch.set_num_threads(1)  # safer on HPC: avoid CPU thread oversubscription
+    torch.set_num_threads(1)
 
-    # ---- CLI arguments ----
     parser = argparse.ArgumentParser()
 
     # Data paths
@@ -65,44 +57,51 @@ def main() -> None:
         default="/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/dataset/splits",
         help="Directory containing train.txt/val.txt/test.txt.",
     )
-
-    # Run / logging
-    parser.add_argument("--runs_dir", type=str, default="runs", help="Base directory for run outputs.")
-    parser.add_argument("--run_name", type=str, default="", help="Optional run name (otherwise timestamp).")
-    parser.add_argument("--save_last", action="store_true", default=True, help="Save checkpoint_last.pt each epoch.")
-    parser.add_argument("--no_save_last", action="store_false", dest="save_last", help="Disable last checkpoint saving.")
-    parser.add_argument("--save_best", action="store_true", default=True, help="Save checkpoint_best.pt by val dice.")
-    parser.add_argument("--no_save_best", action="store_false", dest="save_best", help="Disable best checkpoint saving.")
-    parser.add_argument("--save_every", type=int, default=0, help="If >0, also save every N epochs.")
     parser.add_argument(
-        "--resume_ckpt",
+        "--case_stats_path",
         type=str,
-        default="",
-        help="Path to checkpoint (.pt) to resume from (loads model+optimizer+epoch).",
+        default="",  # if empty, dataset uses data_root/case_stats.json
+        help="Path to case_stats.json (if empty, uses data_root/case_stats.json).",
     )
 
+    # Run / logging
+    parser.add_argument("--runs_dir", type=str, default="runs_3d", help="Base directory for run outputs.")
+    parser.add_argument("--run_name", type=str, default="", help="Optional run name (otherwise timestamp).")
+    parser.add_argument("--save_last", action="store_true", default=True)
+    parser.add_argument("--no_save_last", action="store_false", dest="save_last")
+    parser.add_argument("--save_best", action="store_true", default=True)
+    parser.add_argument("--no_save_best", action="store_false", dest="save_best")
+    parser.add_argument("--save_every", type=int, default=0)
+    parser.add_argument("--resume_ckpt", type=str, default="")
+
     # Training setup
-    parser.add_argument("--model_variant", type=str, default="base", choices=["tiny", "small", "base"])
+    parser.add_argument("--model_variant", type=str, default="nnunet_fullres", choices=["nnunet_fullres", "small"])
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=3)
-    parser.add_argument("--steps_per_epoch", type=int, default=588, help="Iteration budget per epoch (nnU-Net-style).")
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--steps_per_epoch", type=int, default=250)
+
+    # Patch size (nnU-Net-style plan: (Z,Y,X))
+    parser.add_argument("--patch_z", type=int, default=14)
+    parser.add_argument("--patch_y", type=int, default=256)
+    parser.add_argument("--patch_x", type=int, default=448)
+
+    # Foreground forcing config
+    parser.add_argument("--oversample_fg", type=float, default=0.33)
+    parser.add_argument("--fg_thr", type=float, default=0.5)
+    parser.add_argument("--jitter_z", type=int, default=2)
+    parser.add_argument("--jitter_y", type=int, default=32)
+    parser.add_argument("--jitter_x", type=int, default=32)
 
     # Optimizer / LR schedule
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument(
-        "--lr_scheduler",
-        type=str,
-        default="cosine",
-        choices=["none", "cosine", "polynomial"],
-        help="none=constant, cosine=CosineAnnealing, polynomial=(1-step/T)^0.9",
-    )
+    parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["none", "cosine", "polynomial"])
     parser.add_argument("--optimizer", type=str, default="sgd", choices=["sgd", "adam"])
     parser.add_argument("--momentum", type=float, default=0.99)
     parser.add_argument("--weight_decay", type=float, default=3e-5)
 
     # Dataloader / logging frequency
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--log_every", type=int, default=100)
+    parser.add_argument("--log_every", type=int, default=50)
 
     # Loss
     parser.add_argument("--w_bce", type=float, default=1.0)
@@ -110,10 +109,8 @@ def main() -> None:
     parser.add_argument("--batch_dice", action="store_true", default=True)
     parser.add_argument("--no_batch_dice", action="store_false", dest="batch_dice")
 
-    # Preprocessing / shape
-    parser.add_argument("--target_h", type=int, default=896)
-    parser.add_argument("--target_w", type=int, default=1408)
-    parser.add_argument("--transpose_hw", action="store_true")  # default False unless set
+    # Aug hook (off for now)
+    parser.add_argument("--do_augment", action="store_true", default=False)
 
     args = parser.parse_args()
 
@@ -124,7 +121,6 @@ def main() -> None:
 
     print("Run dir:", run_dir)
 
-    # Write config + git commit for reproducibility
     cfg = vars(args).copy()
     with open(run_dir / "git_commit.txt", "w") as f:
         f.write(_get_git_commit() + "\n")
@@ -136,47 +132,51 @@ def main() -> None:
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
-    # ---- Derived training constants ----
-    target_hw = (args.target_h, args.target_w)
+    # ---- Derived constants ----
+    target_zyx = (args.patch_z, args.patch_y, args.patch_x)
     steps_per_epoch = int(args.steps_per_epoch)
     total_steps = int(args.epochs) * steps_per_epoch
 
     # ---- Datasets ----
-    # Train: stochastic (augmentations + oversampling)
-    train_ds = MicroUS2DSliceDataset(
+    case_stats_path = args.case_stats_path if args.case_stats_path.strip() else None
+
+    train_ds = MicroUS3DVolumeDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="train",
-        target_hw=target_hw,
-        transpose_hw=args.transpose_hw,
+        target_zyx=target_zyx,
         seed=0,
+        fg_center_jitter_zyx=(args.jitter_z, args.jitter_y, args.jitter_x),
+        fg_threshold=args.fg_thr,
         deterministic=False,
-        do_augment=True,
+        do_augment=args.do_augment,
         augment_seed=0,
+        case_stats_path=case_stats_path,
     )
 
-    # Val: deterministic, no aug, no oversampling
-    val_ds = MicroUS2DSliceDataset(
+    val_ds = MicroUS3DVolumeDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="val",
-        target_hw=target_hw,
-        transpose_hw=args.transpose_hw,
+        target_zyx=target_zyx,
         seed=0,
+        fg_center_jitter_zyx=(0, 0, 0),
+        fg_threshold=args.fg_thr,
         deterministic=True,
         do_augment=False,
+        case_stats_path=case_stats_path,
     )
 
     # ---- Loaders ----
     pin_memory = torch.cuda.is_available() and args.num_workers > 0
 
-    # Foreground-biased batches (nnU-Net-like)
-    train_batch_sampler = OversampleForegroundBatchSampler(
+    train_batch_sampler = OversampleForegroundBatchSampler3D(
         dataset=train_ds,
         batch_size=args.batch_size,
-        oversample_foreground_percent=0.33,
+        oversample_foreground_percent=args.oversample_fg,
         seed=0,
         drop_last=True,
+        ensure_at_least_one_fg=True,
     )
 
     train_loader = DataLoader(
@@ -194,13 +194,14 @@ def main() -> None:
         pin_memory=pin_memory,
     )
 
-    print(f"Train slices: {len(train_ds)} | Val slices: {len(val_ds)}")
-    print(f"Target HW: {target_hw} | Batch size: {args.batch_size} | LR: {args.lr} | Epochs: {args.epochs}")
+    print(f"Train cases: {len(train_ds)} | Val cases: {len(val_ds)}")
+    print(f"Patch ZYX: {target_zyx} | Batch size: {args.batch_size} | LR: {args.lr} | Epochs: {args.epochs}")
+    print(f"FG oversample: {args.oversample_fg} | jitter_zyx={(args.jitter_z, args.jitter_y, args.jitter_x)}")
     print(f"LR scheduler: {args.lr_scheduler}")
     print(f"DataLoader: num_workers={args.num_workers}, pin_memory={pin_memory}")
 
     # ---- Model ----
-    model, model_meta = build_monai_unet_2d(in_channels=1, out_channels=1, variant=args.model_variant)
+    model, model_meta = build_monai_unet_3d(in_channels=1, out_channels=1, variant=args.model_variant)
     model = model.to(device)
     cfg["model"] = model_meta
 
@@ -213,11 +214,7 @@ def main() -> None:
 
     # ---- Optimizer ----
     if args.optimizer == "adam":
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-        )
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -230,52 +227,39 @@ def main() -> None:
     # ---- Scheduler (iteration-based) ----
     scheduler = None
     if args.lr_scheduler == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=max(total_steps, 1),
-            eta_min=1e-6,
-        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(total_steps, 1), eta_min=1e-6)
     elif args.lr_scheduler == "polynomial":
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer,
             lr_lambda=lambda step: (1 - min(step, total_steps) / max(total_steps, 1)) ** 0.9,
         )
-    # "none" => keep LR constant
 
-    # Save final config after we’ve added model_meta
     with open(run_dir / "config.json", "w") as f:
         json.dump(cfg, f, indent=2)
 
     # ---- Resume (optional) ----
     start_epoch = 1
-    best_val = float("-inf")  # best val_dice_thr05 so far
+    best_val = float("-inf")
 
     if args.resume_ckpt:
         ckpt_path = Path(args.resume_ckpt)
         ckpt = torch.load(ckpt_path, map_location=device)
-
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-
         start_epoch = int(ckpt.get("epoch", 0)) + 1
-
         extra = ckpt.get("extra", {})
         if isinstance(extra, dict) and "best_val_dice_thr05" in extra:
             best_val = float(extra["best_val_dice_thr05"])
-        elif isinstance(extra, dict) and "best_val_dice" in extra:
-            best_val = float(extra["best_val_dice"])
-
-        print(f"Resumed from: {ckpt_path}", flush=True)
-        print(f"Starting at epoch: {start_epoch}", flush=True)
-        print(f"Current best_val_dice_thr05: {best_val}", flush=True)
+        print(f"Resumed from: {ckpt_path}")
+        print(f"Starting at epoch: {start_epoch}")
+        print(f"Current best_val_dice_thr05: {best_val}")
 
     # ---- Training loop ----
     metrics_path = run_dir / "metrics.jsonl"
 
     for epoch in range(start_epoch, start_epoch + args.epochs):
-        t_epoch0 = time.time()
+        t0 = time.time()
 
-        # Train: capped at steps_per_epoch (iteration budget)
         train_metrics = train_one_epoch(
             model=model,
             train_loader=train_loader,
@@ -286,12 +270,11 @@ def main() -> None:
             log_every=args.log_every,
             pin_memory=pin_memory,
             max_steps=steps_per_epoch,
-            scheduler=scheduler, 
+            scheduler=scheduler,
         )
 
         t1 = time.time()
 
-        # Validate: deterministic
         val_metrics = validate(
             model=model,
             val_loader=val_loader,
@@ -304,24 +287,20 @@ def main() -> None:
         )
 
         t2 = time.time()
+
+        # If you prefer per-iteration stepping, move scheduler.step() into train_one_epoch.
         if scheduler is not None:
             scheduler.step()
 
-        # TensorBoard scalars (per epoch)
         writer.add_scalar("train/total_loss", train_metrics["train_total_loss"], epoch)
         writer.add_scalar("val/total_loss", val_metrics["val_total_loss"], epoch)
         writer.add_scalar("val/dice_thr05", val_metrics["val_dice_thr05"], epoch)
         writer.flush()
 
-        epoch_sec = time.time() - t_epoch0
-        print(f"[Epoch {epoch}] time_sec={epoch_sec:.1f}", flush=True)
+        epoch_sec = time.time() - t0
+        print(f"[Epoch {epoch}] time_sec={epoch_sec:.1f}")
+        print(f"[Epoch {epoch}] train_sec={t1-t0:.1f} val_sec={t2-t1:.1f} total_sec={t2-t0:.1f}")
 
-        print(
-            f"[Epoch {epoch}] train_sec={t1-t_epoch0:.1f} val_sec={t2-t1:.1f} total_sec={t2-t_epoch0:.1f}",
-            flush=True,
-        )
-
-        # Persist one JSON record per epoch
         record = {
             "epoch": epoch,
             "epoch_sec": epoch_sec,
@@ -332,7 +311,6 @@ def main() -> None:
         with open(metrics_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
-        # ---- Checkpointing ----
         if args.save_last:
             save_checkpoint(
                 ckpt_path=run_dir / "checkpoint_last.pt",

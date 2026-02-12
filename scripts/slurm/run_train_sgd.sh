@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=pmseg2d
-#SBATCH --output=logs/pmseg2d_%j.out
-#SBATCH --error=logs/pmseg2d_%j.err
-#SBATCH --time=02:00:00
+#SBATCH --job-name=pmseg2d_sgd
+#SBATCH --output=logs/pmseg2d_sgd_%j.out
+#SBATCH --error=logs/pmseg2d_sgd_%j.err
+#SBATCH --time=04:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -20,9 +20,6 @@ source /home/pirie03/envs/prostate_microseg/bin/activate
 echo "venv activated. $(date)"
 
 # optional: avoid CPU thread oversubscription
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
-
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -30,12 +27,15 @@ export NUMEXPR_NUM_THREADS=1
 
 echo "starting python... $(date)"
 python scripts/run_train_2d.py \
-  --epochs 50 \
-  --optimizer adam \
+  --epochs 5 \
+  --steps_per_epoch 250 \
+  --optimizer sgd \
   --lr 3e-4 \
-  --lr_scheduler cosine \
-  --weight_decay 0.0 \
-  --num_workers 4 \
+  --momentum 0.99 \
+  --weight_decay 3e-5 \
+  --lr_scheduler polynomial \
+  --batch_size 3 \
+  --num_workers 0 \
   --w_bce 1.0 \
   --w_dice 1.5
 

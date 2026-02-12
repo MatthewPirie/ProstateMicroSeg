@@ -1,4 +1,5 @@
-# ProstateMicroSeg/src/train/trainer_2d.py
+
+# ProstateMicroSeg/src/train/trainer_3d.py
 
 from __future__ import annotations
 
@@ -18,25 +19,20 @@ def train_one_epoch(
     log_every: int = 100,
     pin_memory: bool = False,
     max_steps: int = 250,   # nnU-Net-style: fixed optimizer steps per epoch
-    scheduler=None,         # if provided, step per iteration
+    scheduler=None,         # if provided, step per iteration (optional)
 ) -> Dict[str, float]:
     """
     One training epoch with a fixed number of optimizer steps (nnU-Net-style).
 
-    Returns:
-        {
-          "train_total_loss": float,
-          "train_bce": float,
-          "train_dice_loss": float
-        }
+    Works for both 2D and 3D because it only assumes tensors shaped:
+      - images: [B, C, ...]
+      - labels: [B, C, ...]
     """
     model.train()
 
-    # For console logging (windowed average)
     running_total = 0.0
     running_steps = 0
 
-    # Epoch averages
     total_sum = 0.0
     bce_sum = 0.0
     dice_loss_sum = 0.0
@@ -51,15 +47,13 @@ def train_one_epoch(
         logits = model(imgs)
         total_loss, parts = criterion(logits, lbls)
 
-        # Backprop + update
         total_loss.backward()
         optimizer.step()
 
-        # IMPORTANT: step LR scheduler per optimizer step (iteration-based scheduling)
+        # If you want iteration-based scheduling, uncomment this and remove scheduler.step() in run_train
         # if scheduler is not None:
         #     scheduler.step()
 
-        # Convert to python floats for aggregation
         total_val = float(total_loss.item())
         bce_val = float(parts["bce"].detach().item())
         dice_loss_val = float(parts["dice_loss"].detach().item())
@@ -74,14 +68,10 @@ def train_one_epoch(
 
         if step == 1 or (log_every > 0 and step % log_every == 0):
             avg_total = running_total / max(running_steps, 1)
-            print(
-                f"[Epoch {epoch}] step {step}/{max_steps} | "
-                f"train_total_loss={avg_total:.4f}"
-            )
+            print(f"[Epoch {epoch}] step {step}/{max_steps} | train_total_loss={avg_total:.4f}")
             running_total = 0.0
             running_steps = 0
 
-        # Stop epoch after fixed number of optimizer updates
         if max_steps is not None and step >= max_steps:
             break
 
@@ -91,28 +81,20 @@ def train_one_epoch(
         "train_dice_loss": dice_loss_sum / max(n_steps, 1),
     }
 
+
 @torch.no_grad()
 def validate(
     model: torch.nn.Module,
     val_loader,
-    criterion,  # expects: total_loss, parts = criterion(logits, targets)
+    criterion,
     device: torch.device,
-    dice_soft_fn,  # expects: dice_soft_fn(logits, targets) -> scalar tensor
-    dice_hard_fn,  # expects: dice_hard_fn(logits, targets) -> scalar tensor
+    dice_soft_fn,
+    dice_hard_fn,
     epoch: int,
     pin_memory: bool = False,
 ) -> Dict[str, float]:
     """
-    Validation loop.
-
-    Returns:
-        {
-          "val_total_loss": float,
-          "val_bce": float,
-          "val_dice_loss": float,
-          "val_dice_soft": float,
-          "val_dice_thr05": float
-        }
+    Validation loop (works for 2D or 3D).
     """
     model.eval()
 
@@ -128,8 +110,8 @@ def validate(
         lbls = batch["label"].to(device, non_blocking=pin_memory)
 
         logits = model(imgs)
-
         total_loss, parts = criterion(logits, lbls)
+
         bce = parts["bce"]
         dice_loss = parts["dice_loss"]
 
@@ -185,5 +167,4 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "extra": extra if extra is not None else {},
     }
-
     torch.save(payload, ckpt_path)
