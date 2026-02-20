@@ -3,36 +3,20 @@
 from __future__ import annotations
 import torch
 
+def dice_hard_from_logits(logits, targets, threshold=0.5, eps=1e-6):
+    if logits.shape != targets.shape:
+        raise RuntimeError(f"Shape mismatch: logits={tuple(logits.shape)} targets={tuple(targets.shape)}")
 
-def dice_hard_from_logits(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    threshold: float = 0.5,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """
-    Hard Dice metric using thresholded predictions.
-
-    Args:
-        logits:  (B,1,H,W)
-        targets: (B,1,H,W) in {0,1}
-
-    Returns:
-        scalar mean Dice over batch
-    """
     probs = torch.sigmoid(logits)
     preds = (probs > threshold).float()
+    targets = (targets > 0.5).float()
 
-    B = preds.shape[0]
-    preds = preds.view(B, -1)
-    targets = targets.view(B, -1)
-
-    inter = (preds * targets).sum(dim=1)
-    denom = preds.sum(dim=1) + targets.sum(dim=1)
+    reduce_dims = tuple(range(2, preds.ndim))  # works for 2D or 3D
+    inter = (preds * targets).sum(dim=reduce_dims)
+    denom = preds.sum(dim=reduce_dims) + targets.sum(dim=reduce_dims)
 
     dice = (2 * inter + eps) / (denom + eps)
     return dice.mean()
-
 
 def dice_soft_from_logits(
     logits: torch.Tensor,

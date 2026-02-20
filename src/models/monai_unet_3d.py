@@ -5,7 +5,6 @@ from typing import Dict, Any, Tuple, List, Optional
 
 import torch
 
-# We prefer DynUNet because it lets us specify per-stage (anisotropic) kernel sizes + strides,
 # which matches nnU-Net's 3D_fullres plan much better than monai.networks.nets.UNet.
 try:
     from monai.networks.nets import DynUNet

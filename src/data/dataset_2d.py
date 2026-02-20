@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from collections import OrderedDict
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
 
 from .transforms_2d import (
     zscore_normalize,
@@ -37,7 +39,7 @@ class SplitSpec:
     labels_subdir: str
 
 
-class MicroUS2DSliceDataset(Dataset):
+class MicroUS2DSlicePatchDataset(Dataset):
     """
     One item = one 2D slice (image, label).
 
@@ -91,10 +93,9 @@ class MicroUS2DSliceDataset(Dataset):
         self.images_dir = self.dataset_root / split_spec.images_subdir
         self.labels_dir = self.dataset_root / split_spec.labels_subdir
 
-        # Cache: keep most recently used case in memory
-        self._cache_case_id: Optional[str] = None
-        self._cache_img: Optional[np.ndarray] = None
-        self._cache_lbl: Optional[np.ndarray] = None
+        # LRU cache: keep last K cases (memmap-backed) to reduce FS thrash
+        self.cache_size = 16  # good starting point; try 8/16/32
+        self._case_cache: "OrderedDict[str, Tuple[np.ndarray, np.ndarray]]" = OrderedDict()
 
         # Index of all (case_id, slice_idx)
         self.index: List[Tuple[str, int]] = self._build_index()
@@ -123,18 +124,24 @@ class MicroUS2DSliceDataset(Dataset):
         return img_path, lbl_path
 
     def _load_case(self, case_id: str) -> Tuple[np.ndarray, np.ndarray]:
-        if self._cache_case_id == case_id and self._cache_img is not None and self._cache_lbl is not None:
-            return self._cache_img, self._cache_lbl
+        # LRU hit
+        if case_id in self._case_cache:
+            img, lbl = self._case_cache.pop(case_id)
+            self._case_cache[case_id] = (img, lbl)  # move to most-recent
+            return img, lbl
 
+        # Miss -> load memmaps
         img_path, lbl_path = self._case_paths(case_id)
-
-        # Memmap: arrays stored as (S, H, W)
         img = np.load(img_path, mmap_mode="r")
         lbl = np.load(lbl_path, mmap_mode="r")
 
-        self._cache_case_id = case_id
-        self._cache_img = img
-        self._cache_lbl = lbl
+        # Insert into cache
+        self._case_cache[case_id] = (img, lbl)
+
+        # Evict least-recent if needed
+        if len(self._case_cache) > self.cache_size:
+            self._case_cache.popitem(last=False)
+
         return img, lbl
 
     def _build_index(self) -> List[Tuple[str, int]]:
@@ -179,9 +186,9 @@ class MicroUS2DSliceDataset(Dataset):
         case_id, s = self.index[int(base_i)]
         img3d, lbl3d = self._load_case(case_id)
 
-        if (not hasattr(self, "_printed_shape")) or (self._printed_shape is False):
-            print(f"[{self.split}] example case {case_id}: img3d shape={img3d.shape}, lbl3d shape={lbl3d.shape}", flush=True)
-            self._printed_shape = True
+        # if (not hasattr(self, "_printed_shape")) or (self._printed_shape is False):
+        #     print(f"[{self.split}] example case {case_id}: img3d shape={img3d.shape}, lbl3d shape={lbl3d.shape}", flush=True)
+        #     self._printed_shape = True
 
         img2d = img3d[s, :, :]
         lbl2d = lbl3d[s, :, :]

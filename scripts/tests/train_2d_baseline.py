@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 print("[train_2d_baseline] torch done, importing dataset_2d...", flush=True)
 
-from src.data.dataset_2d import MicroUS2DSliceDataset
+from src.data.dataset_2d import MicroUS2DSlicePatchDataset
 print("[train_2d_baseline] dataset_2d done, importing monai_unet_2d...", flush=True)
 from src.models.monai_unet_2d import build_monai_unet_2d
 print("[train_2d_baseline] all imports done.", flush=True)
@@ -70,7 +70,7 @@ def main():
 
     target_hw = (args.target_h, args.target_w)
 
-    train_ds = MicroUS2DSliceDataset(
+    train_ds = MicroUS2DSlicePatchDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="train",
@@ -78,7 +78,7 @@ def main():
         transpose_hw=args.transpose_hw,
         only_foreground_slices=False,
     )
-    val_ds = MicroUS2DSliceDataset(
+    val_ds = MicroUS2DSlicePatchDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="val",

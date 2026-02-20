@@ -3,7 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
-from src.data.dataset_2d import MicroUS2DSliceDataset
+from src.data.dataset_2d import MicroUS2DSlicePatchDataset
 from torch.utils.data import DataLoader
 from src.models.monai_unet_2d import build_monai_unet_2d
 import torch.nn as nn
@@ -11,7 +11,7 @@ import torch.nn as nn
 DATA_ROOT = Path("/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/dataset/raw/Dataset120_MicroUSProstate")
 SPLITS_DIR = Path("/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/dataset/splits")
 
-ds = MicroUS2DSliceDataset(
+ds = MicroUS2DSlicePatchDataset(
     dataset_root=DATA_ROOT,
     splits_dir=SPLITS_DIR,
     split="train",

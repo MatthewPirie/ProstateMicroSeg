@@ -8,6 +8,8 @@ checkpoints/
 *.pt
 *.pth
 
+runs_3d/
+
 # python
 __pycache__/
 *.pyc

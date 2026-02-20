@@ -16,12 +16,15 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from src.data.dataset_3d import MicroUS3DVolumeDataset
+from src.data.dataset_3d import MicroUS3DPatchDataset
+from src.data.dataset_cases import MicroUSCaseDataset
 from src.data.samplers_3d import OversampleForegroundBatchSampler3D
 from src.models.monai_unet_3d import build_monai_unet_3d
-from src.train.trainer_3d import train_one_epoch, validate, save_checkpoint
 from src.train.losses import CompoundBCEDiceLoss
 from src.utils.metrics import dice_soft_from_logits, dice_hard_from_logits
+
+from src.train.trainer_3d import train_one_epoch, save_checkpoint
+from src.train.trainer_3d import validate_case_level_3d  # NEW: case-level sliding-window validator
 
 
 def _get_git_commit() -> str:
@@ -60,9 +63,11 @@ def main() -> None:
     parser.add_argument(
         "--case_stats_path",
         type=str,
-        default="",  # if empty, dataset uses data_root/case_stats.json
-        help="Path to case_stats.json (if empty, uses data_root/case_stats.json).",
+        default="",
+        help="Path to JSON with per-case mean/std stats (optional). If empty, uses per-case computed stats.",
     )
+    parser.add_argument("--use_case_stats", action="store_true", default=True)
+    parser.add_argument("--no_use_case_stats", action="store_false", dest="use_case_stats")
 
     # Run / logging
     parser.add_argument("--runs_dir", type=str, default="runs_3d", help="Base directory for run outputs.")
@@ -80,12 +85,12 @@ def main() -> None:
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--steps_per_epoch", type=int, default=250)
 
-    # Patch size (nnU-Net-style plan: (Z,Y,X))
+    # Patch size used for TRAINING (and sliding window ROI size for VAL)
     parser.add_argument("--patch_z", type=int, default=14)
     parser.add_argument("--patch_y", type=int, default=256)
     parser.add_argument("--patch_x", type=int, default=448)
 
-    # Foreground forcing config
+    # Foreground forcing config (training sampler/dataset)
     parser.add_argument("--oversample_fg", type=float, default=0.33)
     parser.add_argument("--fg_thr", type=float, default=0.5)
     parser.add_argument("--jitter_z", type=int, default=2)
@@ -119,7 +124,7 @@ def main() -> None:
     tb_dir = run_dir / "tb"
     writer = SummaryWriter(log_dir=str(tb_dir))
 
-    print("Run dir:", run_dir)
+    print("Run dir:", run_dir, flush=True)
 
     cfg = vars(args).copy()
     with open(run_dir / "git_commit.txt", "w") as f:
@@ -127,24 +132,25 @@ def main() -> None:
 
     # ---- Device ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Device:", device)
+    print("Device:", device, flush=True)
     if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
+        print(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB", flush=True)
 
     # ---- Derived constants ----
-    target_zyx = (args.patch_z, args.patch_y, args.patch_x)
+    patch_zyx = (args.patch_z, args.patch_y, args.patch_x)
     steps_per_epoch = int(args.steps_per_epoch)
     total_steps = int(args.epochs) * steps_per_epoch
 
     # ---- Datasets ----
-    case_stats_path = args.case_stats_path if args.case_stats_path.strip() else None
+    case_stats_path = args.case_stats_path.strip() or None
 
-    train_ds = MicroUS3DVolumeDataset(
+    # Train: patch dataset
+    train_ds = MicroUS3DPatchDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="train",
-        target_zyx=target_zyx,
+        target_zyx=patch_zyx,
         seed=0,
         fg_center_jitter_zyx=(args.jitter_z, args.jitter_y, args.jitter_x),
         fg_threshold=args.fg_thr,
@@ -152,23 +158,27 @@ def main() -> None:
         do_augment=args.do_augment,
         augment_seed=0,
         case_stats_path=case_stats_path,
+        use_case_stats=args.use_case_stats,
     )
 
-    val_ds = MicroUS3DVolumeDataset(
+    # Val: full-case dataset (case-level inference)
+    val_ds = MicroUSCaseDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="val",
-        target_zyx=target_zyx,
-        seed=0,
-        fg_center_jitter_zyx=(0, 0, 0),
         fg_threshold=args.fg_thr,
-        deterministic=True,
-        do_augment=False,
-        case_stats_path=case_stats_path,
+        use_case_stats=args.use_case_stats,
+        case_stats_path=case_stats_path if case_stats_path is not None else (Path(args.data_root) / "case_stats.json"),
     )
 
     # ---- Loaders ----
     pin_memory = torch.cuda.is_available() and args.num_workers > 0
+
+    # Fix 2: persistent workers + prefetch (only if num_workers > 0)
+    dl_kwargs = {}
+    if args.num_workers > 0:
+        dl_kwargs["persistent_workers"] = True
+        dl_kwargs["prefetch_factor"] = 2
 
     train_batch_sampler = OversampleForegroundBatchSampler3D(
         dataset=train_ds,
@@ -184,21 +194,24 @@ def main() -> None:
         batch_sampler=train_batch_sampler,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
+        **dl_kwargs,
     )
 
+    # Case-level val: batch_size must be 1 (one volume at a time)
     val_loader = DataLoader(
         val_ds,
-        batch_size=args.batch_size,
+        batch_size=1,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
+        **dl_kwargs,
     )
 
-    print(f"Train cases: {len(train_ds)} | Val cases: {len(val_ds)}")
-    print(f"Patch ZYX: {target_zyx} | Batch size: {args.batch_size} | LR: {args.lr} | Epochs: {args.epochs}")
-    print(f"FG oversample: {args.oversample_fg} | jitter_zyx={(args.jitter_z, args.jitter_y, args.jitter_x)}")
-    print(f"LR scheduler: {args.lr_scheduler}")
-    print(f"DataLoader: num_workers={args.num_workers}, pin_memory={pin_memory}")
+    print(f"Train patches: {len(train_ds)} | Val cases: {len(val_ds)}", flush=True)
+    print(f"Patch ZYX: {patch_zyx} | Train batch_size: {args.batch_size} | LR: {args.lr} | Epochs: {args.epochs}", flush=True)
+    print(f"FG oversample: {args.oversample_fg} | jitter_zyx={(args.jitter_z, args.jitter_y, args.jitter_x)}", flush=True)
+    print(f"LR scheduler: {args.lr_scheduler}", flush=True)
+    print(f"DataLoader: num_workers={args.num_workers}, pin_memory={pin_memory}", flush=True)
 
     # ---- Model ----
     model, model_meta = build_monai_unet_3d(in_channels=1, out_channels=1, variant=args.model_variant)
@@ -224,7 +237,7 @@ def main() -> None:
             weight_decay=args.weight_decay,
         )
 
-    # ---- Scheduler (iteration-based) ----
+    # ---- Scheduler ----
     scheduler = None
     if args.lr_scheduler == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(total_steps, 1), eta_min=1e-6)
@@ -250,9 +263,9 @@ def main() -> None:
         extra = ckpt.get("extra", {})
         if isinstance(extra, dict) and "best_val_dice_thr05" in extra:
             best_val = float(extra["best_val_dice_thr05"])
-        print(f"Resumed from: {ckpt_path}")
-        print(f"Starting at epoch: {start_epoch}")
-        print(f"Current best_val_dice_thr05: {best_val}")
+        print(f"Resumed from: {ckpt_path}", flush=True)
+        print(f"Starting at epoch: {start_epoch}", flush=True)
+        print(f"Current best_val_dice_thr05: {best_val}", flush=True)
 
     # ---- Training loop ----
     metrics_path = run_dir / "metrics.jsonl"
@@ -275,7 +288,8 @@ def main() -> None:
 
         t1 = time.time()
 
-        val_metrics = validate(
+        # NEW: case-level 3D validation via sliding window inference
+        val_metrics = validate_case_level_3d(
             model=model,
             val_loader=val_loader,
             criterion=criterion,
@@ -283,12 +297,12 @@ def main() -> None:
             dice_soft_fn=lambda lg, y: dice_soft_from_logits(lg, y, batch_dice=args.batch_dice),
             dice_hard_fn=dice_hard_from_logits,
             epoch=epoch,
+            roi_size=patch_zyx,
             pin_memory=pin_memory,
         )
 
         t2 = time.time()
 
-        # If you prefer per-iteration stepping, move scheduler.step() into train_one_epoch.
         if scheduler is not None:
             scheduler.step()
 
@@ -298,8 +312,8 @@ def main() -> None:
         writer.flush()
 
         epoch_sec = time.time() - t0
-        print(f"[Epoch {epoch}] time_sec={epoch_sec:.1f}")
-        print(f"[Epoch {epoch}] train_sec={t1-t0:.1f} val_sec={t2-t1:.1f} total_sec={t2-t0:.1f}")
+        print(f"[Epoch {epoch}] time_sec={epoch_sec:.1f}", flush=True)
+        print(f"[Epoch {epoch}] train_sec={t1-t0:.1f} val_sec={t2-t1:.1f} total_sec={t2-t0:.1f}", flush=True)
 
         record = {
             "epoch": epoch,
@@ -339,7 +353,7 @@ def main() -> None:
                     "args": vars(args),
                 },
             )
-            print(f"[Epoch {epoch}] New best VAL Dice(thr=0.5)={best_val:.4f} -> saved checkpoint_best.pt")
+            print(f"[Epoch {epoch}] New best VAL Dice(thr=0.5)={best_val:.4f} -> saved checkpoint_best.pt", flush=True)
 
         if args.save_every and (epoch % args.save_every == 0):
             save_checkpoint(
@@ -350,7 +364,7 @@ def main() -> None:
                 extra={"train_metrics": train_metrics, "val_metrics": val_metrics, "args": vars(args)},
             )
 
-    print("Finished. Metrics:", metrics_path)
+    print("Finished. Metrics:", metrics_path, flush=True)
     writer.close()
 
 

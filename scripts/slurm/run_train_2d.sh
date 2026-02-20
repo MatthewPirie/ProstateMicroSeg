@@ -11,6 +11,11 @@ echo "job started: $(date)"
 echo "hostname: $(hostname)"
 echo "pwd: $(pwd)"
 
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+nvidia-smi || echo "nvidia-smi failed"
+python -c "import torch; print('torch', torch.__version__); print('torch.version.cuda', torch.version.cuda); print('cuda available', torch.cuda.is_available());"
+scontrol show job $SLURM_JOB_ID | egrep -i "command=|partition=|gres=|tres=|node"
+
 # go to project root (important so relative paths like runs/ work)
 cd /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg || exit 1
 

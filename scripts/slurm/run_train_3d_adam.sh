@@ -29,7 +29,7 @@ python scripts/run_train_3d.py \
   --model_variant nnunet_fullres \
   --optimizer adam \
   --lr 1e-4 \
-  --epochs 50 \
+  --epochs 10 \
   --steps_per_epoch 250 \
   --batch_size 2 \
   --patch_z 14 --patch_y 256 --patch_x 448 \
