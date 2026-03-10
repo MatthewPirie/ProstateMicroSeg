@@ -15,7 +15,7 @@ echo "pwd: $(pwd)"
 cd /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg || exit 1
 
 # make sure logs dir exists (since SLURM writes there)
-mkdir -p logs_v2
+mkdir -p /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/scripts/slurm/logs_v2
 
 # activate venv
 echo "activating venv... $(date)"
@@ -25,10 +25,11 @@ echo "venv activated. $(date)"
 # avoid CPU thread oversubscription
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-python scripts/run_train_3d_v2.py \
+python scripts/run_train_3d_v3.py \
+  --train_config configs/train_3d/centered_translate.yaml \
   --runs_dir runs_3d_v2 \
-  --run_name "v2_${SLURM_JOB_ID}" \
-  --epochs 50 \
+  --run_name "v3_adam_translate_${SLURM_JOB_ID}" \
+  --epochs 250 \
   --steps_per_epoch 250 \
   --batch_size 2 \
   --model_variant nnunet_fullres \
@@ -42,9 +43,12 @@ python scripts/run_train_3d_v2.py \
   --poly_power 0.9 \
   --min_lr 1e-6 \
   --w_bce 1.0 \
-  --w_dice 1.0 \
+  --w_dice 1.25 \
+  --num_val_steps 50 \
+  --fullval_every 50 \
+  --fullval_cases 1 \
   --val_overlap 0.5 \
   --sw_batch_size 1 \
-  --num_workers 4 
+  --num_workers 8
 
 echo "job finished: $(date)"
