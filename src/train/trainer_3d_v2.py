@@ -19,6 +19,8 @@ def train_one_epoch_v2(
     log_every: int = 50,
     pin_memory: bool = False,
     scheduler=None,                 # if provided, step per-iteration
+    scaler=None, 
+    amp: bool = True,
 ) -> Dict[str, float]:
     """
     One training epoch with a fixed number of optimizer steps.
@@ -26,7 +28,6 @@ def train_one_epoch_v2(
     Key behavior:
       - We iterate steps_per_epoch times, regardless of dataset length.
       - If the loader iterator runs out (StopIteration), we re-create it and keep going.
-      - This matches the nnU-Net "epoch = fixed number of iterations" idea.
     """
     model.train()
 
@@ -49,13 +50,21 @@ def train_one_epoch_v2(
         imgs = batch["image"].to(device, non_blocking=pin_memory)
         lbls = batch["label"].to(device, non_blocking=pin_memory)
 
+        use_amp = bool(amp) and (scaler is not None) and torch.cuda.is_available()
+
         optimizer.zero_grad(set_to_none=True)
 
-        logits = model(imgs)
-        total_loss, parts = criterion(logits, lbls)
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            logits = model(imgs)
+            total_loss, parts = criterion(logits, lbls)
 
-        total_loss.backward()
-        optimizer.step()
+        if use_amp:
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total_loss.backward()
+            optimizer.step()
 
         if scheduler is not None:
             scheduler.step()
@@ -73,7 +82,10 @@ def train_one_epoch_v2(
 
         if step == 1 or (log_every > 0 and step % log_every == 0):
             avg_total = running_total / max(running_steps, 1)
-            print(f"[Epoch {epoch}] step {step}/{steps_per_epoch} | train_total_loss={avg_total:.4f}", flush=True)
+            print(
+                f"[Epoch {epoch}] step {step}/{steps_per_epoch} | train_total_loss={avg_total:.4f}",
+                flush=True,
+            )
             running_total = 0.0
             running_steps = 0
 
@@ -82,6 +94,74 @@ def train_one_epoch_v2(
         "train_bce": bce_sum / max(steps_per_epoch, 1),
         "train_dice_loss": dice_loss_sum / max(steps_per_epoch, 1),
     }
+
+
+@torch.no_grad()
+def validate_patches_v2(
+    model: torch.nn.Module,
+    val_loader,              # patch-based val loader
+    criterion,
+    device: torch.device,
+    dice_soft_fn,
+    dice_hard_fn,
+    epoch: int,
+    num_val_steps: int = 50,  # nnU-Net-style: fixed number of validation iterations
+    pin_memory: bool = False,
+) -> Dict[str, float]:
+    """
+    Patch-level (online) validation.
+
+    Behavior:
+      - Runs exactly num_val_steps iterations.
+      - Restarts the DataLoader iterator when exhausted.
+      - Computes loss and dice on patches (NOT full-volume dice).
+    """
+    model.eval()
+
+    total_sum = 0.0
+    bce_sum = 0.0
+    dice_loss_sum = 0.0
+    dice_soft_sum = 0.0
+    dice_hard_sum = 0.0
+
+    it = iter(val_loader)
+
+    for step in range(1, num_val_steps + 1):
+        try:
+            batch = next(it)
+        except StopIteration:
+            it = iter(val_loader)
+            batch = next(it)
+
+        imgs = batch["image"].to(device, non_blocking=pin_memory)
+        lbls = batch["label"].to(device, non_blocking=pin_memory)
+
+        logits = model(imgs)
+        total_loss, parts = criterion(logits, lbls)
+
+        dice_soft = dice_soft_fn(logits, lbls)
+        dice_hard = dice_hard_fn(logits, lbls)
+
+        total_sum += float(total_loss.item())
+        bce_sum += float(parts["bce"].detach().item())
+        dice_loss_sum += float(parts["dice_loss"].detach().item())
+        dice_soft_sum += float(dice_soft.detach().item())
+        dice_hard_sum += float(dice_hard.detach().item())
+
+    out = {
+        "valp_total_loss": total_sum / max(num_val_steps, 1),
+        "valp_bce": bce_sum / max(num_val_steps, 1),
+        "valp_dice_loss": dice_loss_sum / max(num_val_steps, 1),
+        "valp_dice_soft": dice_soft_sum / max(num_val_steps, 1),
+        "valp_dice_thr05": dice_hard_sum / max(num_val_steps, 1),
+    }
+
+    print(
+        f"[Epoch {epoch}] VAL(patches) total_loss={out['valp_total_loss']:.4f} | "
+        f"dice_thr05={out['valp_dice_thr05']:.4f}",
+        flush=True,
+    )
+    return out
 
 
 @torch.no_grad()
@@ -157,7 +237,7 @@ def validate_case_level_3d_v2(
     }
 
     print(
-        f"[Epoch {epoch}] VAL(case,3D) total_loss={out['val_total_loss']:.4f} | "
+        f"[Epoch {epoch}] VAL(cases) total_loss={out['val_total_loss']:.4f} | "
         f"dice_thr05={out['val_dice_thr05']:.4f}",
         flush=True,
     )

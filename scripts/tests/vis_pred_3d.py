@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from src.models.monai_unet_3d import build_monai_unet_3d
 from src.data.dataset_cases import MicroUSCaseDataset
 
-RUN_DIR = Path("/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/runs_3d/20260212_121431")
+RUN_DIR = Path("/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/runs_3d_v2/v2_2233546")
 CKPT_PATH = RUN_DIR / "checkpoint_best.pt"
 
 DATA_ROOT = Path("/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/dataset/processed/Dataset120_MicroUSProstate")

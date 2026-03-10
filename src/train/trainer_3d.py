@@ -81,7 +81,6 @@ def train_one_epoch(
         "train_dice_loss": dice_loss_sum / max(n_steps, 1),
     }
 
-
 @torch.no_grad()
 def validate_case_level_3d(
     model: torch.nn.Module,

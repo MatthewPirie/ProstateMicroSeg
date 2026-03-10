@@ -12,12 +12,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.utils.normalization import zscore_with_stats
-from src.data.transforms_3d_v2 import (
-    pick_random_fg_voxel_3d,
-    compute_crop_pad_params_3d_v2,
-    apply_crop_pad_3d,
-    center_crop_or_pad_3d,
-)
+from src.data.extractors import get_extractor
 
 
 def read_case_ids(txt_path: Path) -> List[str]:
@@ -40,42 +35,44 @@ class SplitSpec:
 
 class MicroUS3DPatchDatasetV2(Dataset):
     """
-    v2 3D patch dataset.
+    3D dataset that returns one extracted sample per __getitem__.
 
-    - One item = one (image_patch, label_patch) sampled from a full 3D volume.
-    - Uses memmap-backed npy loading + 1-case cache.
-    - Z-score normalization per case using case_stats.json (mean/std).
-    - Training sampling:
-        * if force_fg=True: pick random FG voxel and place it at a RANDOM location in patch
-        * else: pure random crop (or random pad placement if vol < patch)
-    - Optional deterministic mode:
-        * center_crop_or_pad_3d for both image and label (no force_fg)
+    Pipeline:
+      1) Load full case volume (memmap .npy) with 1-case cache
+      2) Z-score normalize image using case_stats.json (mean/std) or per-volume stats
+      3) Extract (img_out, lbl_out) using a selectable extractor function
+      4) Binarize label using fg_threshold
+      5) Convert to torch [C, Z, Y, X]
+      6) Apply optional transform (e.g., MONAI augmentations) on the extracted sample
     """
 
     def __init__(
         self,
         dataset_root: str | Path,
         splits_dir: str | Path,
-        split: str,  # "train" | "val" | "test"
+        split: str,
         target_zyx: Tuple[int, int, int] = (14, 256, 448),
         seed: int = 0,
         fg_threshold: float = 0.5,
         deterministic: bool = False,
+        transform=None,
         use_case_stats: bool = True,
         case_stats_path: str | Path | None = None,
         eps: float = 1e-8,
+        extractor_name: str = "patch_centered_fg",
+        extractor_kwargs: Optional[Dict[str, Any]] = None,
     ):
         self.dataset_root = Path(dataset_root)
         self.splits_dir = Path(splits_dir)
-        self.split = split.lower()
+        self.split = str(split).lower()
 
         self.target_zyx = tuple(int(v) for v in target_zyx)
         self.fg_threshold = float(fg_threshold)
         self.deterministic = bool(deterministic)
+        self.transform = transform
 
         self.use_case_stats = bool(use_case_stats)
         self.eps = float(eps)
-
         self.rng = np.random.default_rng(int(seed))
 
         split_spec = self._make_split_spec(self.split)
@@ -87,11 +84,15 @@ class MicroUS3DPatchDatasetV2(Dataset):
         if len(self.index) == 0:
             raise RuntimeError("Index is empty. Check split files and data paths.")
 
-        # Case stats (mean/std per case) for zscore
+        # ---- Extractor setup ----
+        self.extractor_name = str(extractor_name)
+        self.extractor = get_extractor(self.extractor_name)
+        self.extractor_kwargs: Dict[str, Any] = dict(extractor_kwargs) if extractor_kwargs is not None else {}
+
+        # ---- Case stats (mean/std per case) for zscore ----
         self.case_stats: Dict[str, Dict[str, float]] = {}
         if self.use_case_stats:
             if case_stats_path is None:
-                # default to dataset_root/case_stats.json
                 case_stats_path = self.dataset_root / "case_stats.json"
             case_stats_path = Path(case_stats_path)
             if not case_stats_path.exists():
@@ -106,7 +107,7 @@ class MicroUS3DPatchDatasetV2(Dataset):
                     f"case_stats missing {len(missing)} case_ids for split='{self.split}'. Examples: {ex}"
                 )
 
-        # 1-case cache (memmap-backed)
+        # ---- 1-case cache (memmap-backed) ----
         self._cache_case_id: Optional[str] = None
         self._cache_img: Optional[np.ndarray] = None
         self._cache_lbl: Optional[np.ndarray] = None
@@ -156,9 +157,9 @@ class MicroUS3DPatchDatasetV2(Dataset):
         img3d_m, lbl3d_m = self._load_case(case_id)
 
         img_np = np.asarray(img3d_m)  # (Z,Y,X)
-        lbl_np = np.asarray(lbl3d_m)  # (Z,Y,X), binary float32 in your dataset
+        lbl_np = np.asarray(lbl3d_m)  # (Z,Y,X)
 
-        # Normalize image (z-score)
+        # ---- Normalize on full volume (before extraction) ----
         if self.use_case_stats:
             st = self.case_stats[case_id]
             mean = float(st["mean"])
@@ -169,39 +170,35 @@ class MicroUS3DPatchDatasetV2(Dataset):
 
         img_np = zscore_with_stats(img_np, mean, std, eps=self.eps)
 
-        # Patch extraction
-        if self.deterministic:
-            # deterministic validation-style patch
-            img_patch = center_crop_or_pad_3d(img_np, self.target_zyx, pad_value=0.0)
-            lbl_patch = center_crop_or_pad_3d(lbl_np, self.target_zyx, pad_value=0.0)
-            force_fg = False
-        else:
-            center_zyx = None
-            if force_fg:
-                center_zyx = pick_random_fg_voxel_3d(lbl_np, rng=self.rng, thresh=self.fg_threshold)
-                if center_zyx is None:
-                    force_fg = False  # fallback to random sampling if no FG exists
+        # ---- Extraction via selected extractor ----
+        img_out, lbl_out, meta = self.extractor(
+            img_np,
+            lbl_np,
+            target_zyx=self.target_zyx,
+            rng=self.rng,
+            deterministic=self.deterministic,
+            force_fg=bool(force_fg),
+            fg_threshold=self.fg_threshold,
+            **self.extractor_kwargs,
+        )
 
-            params = compute_crop_pad_params_3d_v2(
-                in_zyx=img_np.shape,
-                target_zyx=self.target_zyx,
-                rng=self.rng,
-                center_zyx=center_zyx,
-            )
-
-            img_patch = apply_crop_pad_3d(img_np, params, pad_value=0.0)
-            lbl_patch = apply_crop_pad_3d(lbl_np, params, pad_value=0.0)
-
-        # Ensure binary label (safe, given your EDA shows {0,1})
-        lbl_patch = (lbl_patch > self.fg_threshold).astype(np.float32)
+        # Ensure binary label (safe)
+        lbl_out = (lbl_out > self.fg_threshold).astype(np.float32)
 
         # To torch, channel-first: [C,Z,Y,X]
-        img_t = torch.from_numpy(img_patch).unsqueeze(0).float()
-        lbl_t = torch.from_numpy(lbl_patch).unsqueeze(0).float()
+        img_t = torch.from_numpy(img_out).unsqueeze(0).float()
+        lbl_t = torch.from_numpy(lbl_out).unsqueeze(0).float()
 
-        return {
+        sample: Dict[str, Any] = {
             "image": img_t,
             "label": lbl_t,
             "case_id": case_id,
             "force_fg": bool(force_fg),
+            "extractor": self.extractor_name,
         }
+
+        # Apply augmentations on the EXTRACTED sample (train only)
+        if (not self.deterministic) and (self.transform is not None):
+            sample = self.transform(sample)
+
+        return sample

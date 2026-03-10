@@ -1,0 +1,8 @@
+extractor:
+  name: patch_centered_fg
+  kwargs:
+    center_jitter_zyx: [2, 32, 32]
+
+augmentations:
+  enabled:
+    - translate

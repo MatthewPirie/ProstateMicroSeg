@@ -3,12 +3,7 @@ dataset/raw/
 dataset/processed/
 
 # outputs
-runs/
-checkpoints/
-*.pt
-*.pth
-
-runs_3d/
+*runs*/
 
 # python
 __pycache__/
