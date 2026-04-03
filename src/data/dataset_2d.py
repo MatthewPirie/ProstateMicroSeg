@@ -67,12 +67,17 @@ class MicroUS2DSlicePatchDataset(Dataset):
         deterministic: bool = False,
         do_augment: bool = False,
         augment_seed: int = 0,
+        preprocess_mode: str = "crop_pad",  # "crop_pad" | "resize"
     ):
         self.dataset_root = Path(dataset_root)
         self.splits_dir = Path(splits_dir)
         self.split = split.lower()
         self.target_hw = target_hw
         self.transpose_hw = transpose_hw
+
+        if preprocess_mode not in {"crop_pad", "resize"}:
+            raise ValueError(f"preprocess_mode must be 'crop_pad' or 'resize', got {preprocess_mode!r}")
+        self.preprocess_mode = preprocess_mode
 
         self.rng = np.random.default_rng(seed)
         self.fg_center_jitter = int(fg_center_jitter)
@@ -197,30 +202,43 @@ class MicroUS2DSlicePatchDataset(Dataset):
             img2d = img2d.T
             lbl2d = lbl2d.T
 
-        # Normalize BEFORE crop/pad (important)
+        # Normalize BEFORE spatial preprocessing (important)
         img2d = zscore_normalize(img2d)
 
-        if self.deterministic:
-            # Validation: deterministic center crop/pad, no FG forcing
-            img2d = center_crop_or_pad_2d(img2d, self.target_hw, pad_value=0.0)
-            lbl2d = center_crop_or_pad_2d(lbl2d, self.target_hw, pad_value=0.0)
-            force_fg = False
-        else:
-            # Training: stochastic crop/pad, optional FG centering
-            center_yx = None
-            if force_fg:
-                center_yx = pick_random_foreground_center(lbl2d, rng=self.rng, thresh=self.fg_threshold)
+        if self.preprocess_mode == "crop_pad":
+            if self.deterministic:
+                # Validation: deterministic center crop/pad, no FG forcing
+                img2d = center_crop_or_pad_2d(img2d, self.target_hw, pad_value=0.0)
+                lbl2d = center_crop_or_pad_2d(lbl2d, self.target_hw, pad_value=0.0)
+                force_fg = False
+            else:
+                # Training: stochastic crop/pad, optional FG centering
+                center_yx = None
+                if force_fg:
+                    center_yx = pick_random_foreground_center(lbl2d, rng=self.rng, thresh=self.fg_threshold)
 
-            # NEW: compute one shared crop/pad plan, then apply to BOTH image and label
-            params = compute_crop_pad_params_2d(
-                in_hw=img2d.shape,
-                target_hw=self.target_hw,
-                rng=self.rng,
-                center_yx=center_yx,
-                center_jitter=self.fg_center_jitter,
-            )
-            img2d = apply_crop_pad_2d(img2d, params, pad_value=0.0)
-            lbl2d = apply_crop_pad_2d(lbl2d, params, pad_value=0.0)
+                params = compute_crop_pad_params_2d(
+                    in_hw=img2d.shape,
+                    target_hw=self.target_hw,
+                    rng=self.rng,
+                    center_yx=center_yx,
+                    center_jitter=self.fg_center_jitter,
+                )
+                img2d = apply_crop_pad_2d(img2d, params, pad_value=0.0)
+                lbl2d = apply_crop_pad_2d(lbl2d, params, pad_value=0.0)
+
+        elif self.preprocess_mode == "resize":
+            th, tw = self.target_hw
+            # img2d: bilinear interpolation (float)
+            img_tmp = torch.from_numpy(img2d).unsqueeze(0).unsqueeze(0).float()
+            img2d = torch.nn.functional.interpolate(
+                img_tmp, size=(th, tw), mode="bilinear", align_corners=False
+            ).squeeze(0).squeeze(0).numpy()
+            # lbl2d: nearest interpolation to preserve label values
+            lbl_tmp = torch.from_numpy(lbl2d).unsqueeze(0).unsqueeze(0).float()
+            lbl2d = torch.nn.functional.interpolate(
+                lbl_tmp, size=(th, tw), mode="nearest"
+            ).squeeze(0).squeeze(0).numpy()
 
         # Ensure binary label (before MONAI aug)
         lbl2d = (lbl2d > self.fg_threshold).astype(np.float32)

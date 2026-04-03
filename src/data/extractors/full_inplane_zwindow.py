@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
+
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 
 def _pad_z_to_window(
@@ -12,14 +15,16 @@ def _pad_z_to_window(
     pad_value: float,
 ) -> np.ndarray:
     """
-    Pad a (Z,Y,X) volume along Z to reach target_z, symmetric padding.
+    Pad a (Z, Y, X) volume along Z to reach target_z, using symmetric padding.
     """
     z, y, x = vol.shape
     if z >= target_z:
         return vol
+
     pad_total = target_z - z
     pad_before = pad_total // 2
     pad_after = pad_total - pad_before
+
     return np.pad(
         vol,
         pad_width=((pad_before, pad_after), (0, 0), (0, 0)),
@@ -30,11 +35,55 @@ def _pad_z_to_window(
 
 def _fg_slices(lbl_np: np.ndarray, fg_threshold: float) -> np.ndarray:
     """
-    Return array of z indices where the label has any foreground.
+    Return z indices where the label contains any foreground.
     """
-    # (Z,Y,X) -> (Z,) boolean: any FG in each slice
     has_fg = (lbl_np > fg_threshold).reshape(lbl_np.shape[0], -1).any(axis=1)
     return np.nonzero(has_fg)[0]
+
+
+def _resize_xy_slicewise(
+    vol: np.ndarray,
+    target_yx: Tuple[int, int],
+    *,
+    mode: str,
+) -> np.ndarray:
+    """
+    Resize each slice in a (Z, Y, X) volume to (target_y, target_x),
+    without changing Z.
+
+    Uses torch interpolation slice-wise by treating Z as batch:
+      input  -> [Z, 1, Y, X]
+      output -> [Z, 1, target_y, target_x]
+    """
+    if vol.ndim != 3:
+        raise ValueError(f"Expected (Z, Y, X), got shape {vol.shape}.")
+
+    target_y, target_x = int(target_yx[0]), int(target_yx[1])
+    z, y, x = vol.shape
+
+    if y == target_y and x == target_x:
+        return vol
+
+    vol_t = torch.from_numpy(vol).unsqueeze(1).float()  # [Z, 1, Y, X]
+
+    if mode == "nearest":
+        out_t = F.interpolate(
+            vol_t,
+            size=(target_y, target_x),
+            mode="nearest",
+        )
+    elif mode in {"bilinear", "bicubic"}:
+        out_t = F.interpolate(
+            vol_t,
+            size=(target_y, target_x),
+            mode=mode,
+            align_corners=False,
+        )
+    else:
+        raise ValueError(f"Unsupported resize mode: {mode}")
+
+    out = out_t.squeeze(1).cpu().numpy()  # [Z, target_y, target_x]
+    return out
 
 
 def extract(
@@ -48,99 +97,116 @@ def extract(
     fg_threshold: float,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
-    Full in-plane extraction with a Z window.
+    Full in-plane extraction with a Z window, followed by XY resizing.
+
+    Logic:
+      1) Choose a contiguous Z window of length z_window
+      2) Do NOT resize/interpolate in Z
+      3) Resize XY of the extracted subvolume to (target_y, target_x)
 
     Output:
-      img_out, lbl_out: (Z_window, Y, X) where Y,X are unchanged (full in-plane).
+      img_out, lbl_out: (z_window, target_y, target_x)
 
     Rules:
       - deterministic=True:
-          take centered Z window (or pad if Z < Z_window)
+          take centered Z window (or pad in Z first if Z < z_window)
       - deterministic=False and force_fg=False:
-          choose z0 uniformly from [0, Z - Z_window] (or pad if needed)
+          choose z0 uniformly from [0, Z - z_window] (or pad in Z first if needed)
       - deterministic=False and force_fg=True:
           pick a random FG slice z_fg, then choose z0 uniformly from the valid
-          start positions that ensure z_fg is inside [z0, z0+Z_window-1].
+          start positions that ensure z_fg is inside [z0, z0 + z_window - 1].
           If no FG exists, fall back to uniform random z0.
     """
     if img_np.ndim != 3 or lbl_np.ndim != 3:
-        raise ValueError(f"Expected 3D arrays (Z,Y,X). Got img {img_np.shape}, lbl {lbl_np.shape}.")
+        raise ValueError(
+            f"Expected 3D arrays (Z, Y, X). Got img {img_np.shape}, lbl {lbl_np.shape}."
+        )
     if img_np.shape != lbl_np.shape:
         raise ValueError(f"img/lbl shape mismatch: img {img_np.shape}, lbl {lbl_np.shape}.")
 
-    z_win = int(target_zyx[0])
-    if z_win <= 0:
-        raise ValueError(f"Z window must be > 0, got {z_win}.")
+    z_window = int(target_zyx[0])
+    target_y = int(target_zyx[1])
+    target_x = int(target_zyx[2])
+
+    if z_window <= 0:
+        raise ValueError(f"z_window must be > 0, got {z_window}.")
+    if target_y <= 0 or target_x <= 0:
+        raise ValueError(f"target_y and target_x must be > 0, got {(target_y, target_x)}.")
 
     Z, Y, X = img_np.shape
 
-    # If the case is shorter than the window, pad in Z first (symmetric).
-    if Z < z_win:
-        img_pad = _pad_z_to_window(img_np, z_win, pad_value=0.0)
-        lbl_pad = _pad_z_to_window(lbl_np, z_win, pad_value=0.0)
-        meta = {
-            "extractor": "full_inplane_zwindow",
-            "deterministic": bool(deterministic),
-            "force_fg_requested": bool(force_fg),
-            "force_fg_used": False,
-            "z0": 0,
-            "z_window": z_win,
-            "padded_z": True,
-            "orig_shape": (int(Z), int(Y), int(X)),
-            "out_shape": tuple(int(v) for v in img_pad.shape),
-        }
-        return img_pad[:z_win, :, :], lbl_pad[:z_win, :, :], meta
+    padded_z = False
+    force_fg_used = False
 
-    # Now Z >= z_win, so we can choose a valid z0 in [0, Z - z_win]
-    max_start = Z - z_win
+    # ------------------------------------------------------------------
+    # Step 1: ensure we can return exactly z_window slices
+    # ------------------------------------------------------------------
+    if Z < z_window:
+        img_work = _pad_z_to_window(img_np, z_window, pad_value=0.0)
+        lbl_work = _pad_z_to_window(lbl_np, z_window, pad_value=0.0)
+        padded_z = True
+        Z_work = z_window
+    else:
+        img_work = img_np
+        lbl_work = lbl_np
+        Z_work = Z
+
+    # ------------------------------------------------------------------
+    # Step 2: choose contiguous Z window
+    # ------------------------------------------------------------------
+    max_start = Z_work - z_window
 
     if deterministic:
         z0 = max_start // 2
-        meta = {
-            "extractor": "full_inplane_zwindow",
-            "deterministic": True,
-            "force_fg_requested": bool(force_fg),
-            "force_fg_used": False,
-            "z0": int(z0),
-            "z_window": int(z_win),
-            "padded_z": False,
-            "orig_shape": (int(Z), int(Y), int(X)),
-        }
-        return img_np[z0 : z0 + z_win, :, :], lbl_np[z0 : z0 + z_win, :, :], meta
+    else:
+        z0: Optional[int] = None
 
-    # Training/random mode
-    force_fg_used = False
-    z0: Optional[int] = None
+        if force_fg:
+            fg_idx = _fg_slices(lbl_work, fg_threshold=fg_threshold)
+            if fg_idx.size > 0:
+                z_fg = int(fg_idx[int(rng.integers(0, fg_idx.size))])
 
-    if force_fg:
-        fg_idx = _fg_slices(lbl_np, fg_threshold=fg_threshold)
-        if fg_idx.size > 0:
-            z_fg = int(fg_idx[int(rng.integers(0, fg_idx.size))])
+                # Need z_fg inside [z0, z0 + z_window - 1]
+                low = max(0, z_fg - (z_window - 1))
+                high = min(z_fg, max_start)
 
-            # Valid z0 range that includes z_fg:
-            # z0 <= z_fg <= z0 + z_win - 1  =>
-            # z0 in [z_fg-(z_win-1), z_fg]
-            low = max(0, z_fg - (z_win - 1))
-            high = min(z_fg, max_start)
+                if low <= high:
+                    z0 = int(rng.integers(low, high + 1))
+                    force_fg_used = True
 
-            # If low/high are valid, sample uniformly in that range.
-            if low <= high:
-                z0 = int(rng.integers(low, high + 1))
-                force_fg_used = True
+        if z0 is None:
+            z0 = int(rng.integers(0, max_start + 1))
 
-    # Fallback to uniform random window
-    if z0 is None:
-        z0 = int(rng.integers(0, max_start + 1))
+    img_crop = img_work[z0 : z0 + z_window, :, :]
+    lbl_crop = lbl_work[z0 : z0 + z_window, :, :]
+
+    # ------------------------------------------------------------------
+    # Step 3: resize XY only, keep Z unchanged
+    # ------------------------------------------------------------------
+    img_out = _resize_xy_slicewise(
+        img_crop.astype(np.float32, copy=False),
+        (target_y, target_x),
+        mode="bilinear",
+    )
+
+    lbl_out = _resize_xy_slicewise(
+        lbl_crop.astype(np.float32, copy=False),
+        (target_y, target_x),
+        mode="nearest",
+    )
 
     meta = {
         "extractor": "full_inplane_zwindow",
-        "deterministic": False,
+        "deterministic": bool(deterministic),
         "force_fg_requested": bool(force_fg),
         "force_fg_used": bool(force_fg_used),
         "z0": int(z0),
-        "z_window": int(z_win),
-        "padded_z": False,
+        "z_window": int(z_window),
+        "padded_z": bool(padded_z),
         "orig_shape": (int(Z), int(Y), int(X)),
+        "pre_resize_shape": tuple(int(v) for v in img_crop.shape),
+        "out_shape": tuple(int(v) for v in img_out.shape),
+        "target_xy": (int(target_y), int(target_x)),
     }
 
-    return img_np[z0 : z0 + z_win, :, :], lbl_np[z0 : z0 + z_win, :, :], meta
+    return img_out, lbl_out, meta

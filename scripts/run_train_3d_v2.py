@@ -25,7 +25,7 @@ from src.models.monai_unet_3d import build_monai_unet_3d
 from src.train.losses import CompoundBCEDiceLoss
 from src.utils.metrics import dice_soft_from_logits, dice_hard_from_logits
 
-from src.train.trainer_3d_v2 import train_one_epoch_v2, validate_case_level_3d_v2, save_checkpoint_v2
+from src.train.trainer_3d_v2 import train_one_epoch_v2, validate_cases_slidingwindow_3d, save_checkpoint_v2
 
 
 def _get_git_commit() -> str:
@@ -304,7 +304,7 @@ def main() -> None:
 
         t1 = time.time()
 
-        val_metrics = validate_case_level_3d_v2(
+        val_metrics = validate_cases_slidingwindow_3d(
             model=model,
             val_loader=val_loader,
             criterion=criterion,

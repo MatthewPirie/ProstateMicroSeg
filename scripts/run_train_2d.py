@@ -87,6 +87,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=3)
     parser.add_argument("--steps_per_epoch", type=int, default=588)
+    parser.add_argument("--preprocess_mode", type=str, default="crop_pad")
+
 
     # Optimizer / LR schedule
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -144,6 +146,7 @@ def main() -> None:
     target_hw = (int(args.target_h), int(args.target_w))
     steps_per_epoch = int(args.steps_per_epoch)
     total_steps = int(args.epochs) * steps_per_epoch
+    preprocess_mode = args.preprocess_mode
 
     # Datasets
     train_ds = MicroUS2DSlicePatchDataset(
@@ -156,6 +159,7 @@ def main() -> None:
         deterministic=False,
         do_augment=True,
         augment_seed=0,
+        preprocess_mode=preprocess_mode
     )
 
     val_ds = MicroUSCaseDataset(

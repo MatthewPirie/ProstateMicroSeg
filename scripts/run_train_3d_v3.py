@@ -32,8 +32,9 @@ from src.utils.visualization import save_val_case_slice_grid_png
 
 from src.train.trainer_3d_v2 import (
     train_one_epoch_v2,
-    validate_patches_v2,
-    validate_case_level_3d_v2,
+    validate_patches_3d,
+    validate_cases_slidingwindow_3d,
+    validate_cases_fullinplane_3d,
     save_checkpoint_v2,
 )
 
@@ -218,6 +219,15 @@ def main() -> None:
     extractor_kwargs = dict(extractor_cfg.get("kwargs", {}))
     enabled_augs = list(aug_cfg.get("enabled", []))
 
+    FULL_INPLANE_EXTRACTORS = {"full_inplane_zwindow"}
+
+    if extractor_name in FULL_INPLANE_EXTRACTORS:
+        case_val_fn = validate_cases_fullinplane_3d
+        case_vis_mode = "fullinplane"
+    else:
+        case_val_fn = validate_cases_slidingwindow_3d
+        case_vis_mode = "slidingwindow"
+
     print(f"Train config: {train_config_path}", flush=True)
     print(f"Extractor: {extractor_name}", flush=True)
     print(f"Extractor kwargs: {extractor_kwargs}", flush=True)
@@ -328,7 +338,7 @@ def main() -> None:
 
     val_case_loader = DataLoader(
         val_case_ds,
-        batch_size=1,
+        batch_size=10,
         shuffle=False,
         num_workers=int(args.num_workers),
         pin_memory=pin_memory,
@@ -453,7 +463,7 @@ def main() -> None:
         t1 = time.time()
 
         # Online patch validation every epoch
-        valp_metrics = validate_patches_v2(
+        valp_metrics = validate_patches_3d(
             model=model,
             val_loader=val_patch_loader,
             criterion=criterion,
@@ -473,7 +483,7 @@ def main() -> None:
         do_full = int(args.fullval_every) > 0 and (epoch % int(args.fullval_every) == 0)
 
         if do_full:
-            fullval_metrics = validate_case_level_3d_v2(
+            fullval_metrics = case_val_fn(
                 model=model,
                 val_loader=val_case_loader,
                 criterion=criterion,
@@ -598,6 +608,7 @@ def main() -> None:
         thr=0.5,
         choose="middle",
         amp=True,
+        vis_mode=case_vis_mode,
     )
 
     print(f"Saved final visualization: {out_png} | slice_dice={dice2d:.4f}", flush=True)

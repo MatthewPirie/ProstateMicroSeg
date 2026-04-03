@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pmseg2d
-#SBATCH --output=logs/pmseg2d_%j.out
-#SBATCH --error=logs/pmseg2d_%j.err
+#SBATCH --output=logs_new/pmseg2d_%j.out
+#SBATCH --error=logs_new/pmseg2d_%j.err
 #SBATCH --time=02:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -35,13 +35,14 @@ export NUMEXPR_NUM_THREADS=1
 
 echo "starting python... $(date)"
 python scripts/run_train_2d.py \
-  --epochs 50 \
+  --epochs 500 \
   --optimizer adam \
   --lr 3e-4 \
   --lr_scheduler cosine \
   --weight_decay 0.0 \
   --num_workers 4 \
   --w_bce 1.0 \
-  --w_dice 1.5
+  --w_dice 1.5 \
+  --preprocess_mode resize
 
 echo "job finished: $(date)"
