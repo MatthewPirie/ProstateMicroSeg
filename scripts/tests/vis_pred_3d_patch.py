@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 from src.models.monai_unet_3d import build_monai_unet_3d
 from src.data.dataset_cases import MicroUSCaseDataset
-from src.utils.metrics import dice_hard_from_logits
+from src.utils.metrics import hard_dice_score
 
 # -------------------------
 # EDIT THESE
@@ -201,7 +201,7 @@ def main():
             logits = model(img_t)
 
         # dice on this patch
-        d = float(dice_hard_from_logits(logits, lbl_t, threshold=THR).item())
+        d = float(hard_dice_score(logits, lbl_t, threshold=THR).item())
 
         # get center z-slice for visualization
         zc = ROI_ZYX[0] // 2

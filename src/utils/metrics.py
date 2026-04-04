@@ -3,22 +3,8 @@
 from __future__ import annotations
 import torch
 
-def dice_hard_from_logits(logits, targets, threshold=0.5, eps=1e-6):
-    if logits.shape != targets.shape:
-        raise RuntimeError(f"Shape mismatch: logits={tuple(logits.shape)} targets={tuple(targets.shape)}")
 
-    probs = torch.sigmoid(logits)
-    preds = (probs > threshold).float()
-    targets = (targets > 0.5).float()
-
-    reduce_dims = tuple(range(2, preds.ndim))  # works for 2D or 3D
-    inter = (preds * targets).sum(dim=reduce_dims)
-    denom = preds.sum(dim=reduce_dims) + targets.sum(dim=reduce_dims)
-
-    dice = (2 * inter + eps) / (denom + eps)
-    return dice.mean()
-
-def dice_soft_from_logits(
+def soft_dice_score(
     logits: torch.Tensor,
     targets: torch.Tensor,
     batch_dice: bool = True,
@@ -55,3 +41,18 @@ def dice_soft_from_logits(
 
         dice = (2 * inter + eps) / (denom + eps)
         return dice.mean()
+
+def hard_dice_score(logits, targets, threshold=0.5, eps=1e-6):
+    if logits.shape != targets.shape:
+        raise RuntimeError(f"Shape mismatch: logits={tuple(logits.shape)} targets={tuple(targets.shape)}")
+
+    probs = torch.sigmoid(logits)
+    preds = (probs > threshold).float()
+    targets = (targets > 0.5).float()
+
+    reduce_dims = tuple(range(2, preds.ndim))  # works for 2D or 3D
+    inter = (preds * targets).sum(dim=reduce_dims)
+    denom = preds.sum(dim=reduce_dims) + targets.sum(dim=reduce_dims)
+
+    dice = (2 * inter + eps) / (denom + eps)
+    return dice.mean()

@@ -1,0 +1,5 @@
+augmentations:
+  enabled:
+    - flip
+    - affine
+

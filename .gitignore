@@ -19,3 +19,6 @@ slurm-*.out
 scripts/slurm/logs/
 *.out
 *.err
+
+# old pipeline
+legacy_pipeline/

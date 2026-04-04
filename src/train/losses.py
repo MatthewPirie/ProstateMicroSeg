@@ -31,7 +31,6 @@ def soft_dice_loss(probs, targets, batch_dice=True, eps=1e-6):
 
         return 1 - dice.mean()
 
-
 class CompoundBCEDiceLoss(nn.Module):
     def __init__(self, w_bce=1.0, w_dice=1.0, batch_dice=True):
         super().__init__()

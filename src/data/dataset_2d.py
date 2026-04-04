@@ -13,14 +13,14 @@ from torch.utils.data import Dataset
 
 
 from .transforms_2d import (
-    zscore_normalize,
-    pick_random_foreground_center,
-    compute_crop_pad_params_2d,
-    apply_crop_pad_2d,
-    center_crop_or_pad_2d,
+    zscore_normalize_2d,
+    sample_foreground_center_2d,
+    compute_stochastic_crop_pad_plan_2d,
+    apply_crop_pad_plan_2d,
+    deterministic_center_crop_pad_2d,
 )
 
-from .augmentations_2d import get_train_transforms_2d
+from .augmentations_2d import build_train_transforms_2d
 
 def read_case_ids(txt_path: Path) -> List[str]:
     case_ids: List[str] = []
@@ -39,7 +39,7 @@ class SplitSpec:
     labels_subdir: str
 
 
-class MicroUS2DSlicePatchDataset(Dataset):
+class MicroUS2DSliceDataset(Dataset):
     """
     One item = one 2D slice (image, label).
 
@@ -68,6 +68,7 @@ class MicroUS2DSlicePatchDataset(Dataset):
         do_augment: bool = False,
         augment_seed: int = 0,
         preprocess_mode: str = "crop_pad",  # "crop_pad" | "resize"
+        enabled_augs: Optional[List[str]] = None,
     ):
         self.dataset_root = Path(dataset_root)
         self.splits_dir = Path(splits_dir)
@@ -88,8 +89,9 @@ class MicroUS2DSlicePatchDataset(Dataset):
         self.do_augment = bool(do_augment) and (self.split == "train") and (not self.deterministic)
         self.aug = None
         if self.do_augment:
-            self.aug = get_train_transforms_2d(
+            self.aug = build_train_transforms_2d(
                 target_hw=self.target_hw,
+                enabled_augs=enabled_augs,
                 seed=int(augment_seed),
             )
 
@@ -203,29 +205,29 @@ class MicroUS2DSlicePatchDataset(Dataset):
             lbl2d = lbl2d.T
 
         # Normalize BEFORE spatial preprocessing (important)
-        img2d = zscore_normalize(img2d)
+        img2d = zscore_normalize_2d(img2d)
 
         if self.preprocess_mode == "crop_pad":
             if self.deterministic:
                 # Validation: deterministic center crop/pad, no FG forcing
-                img2d = center_crop_or_pad_2d(img2d, self.target_hw, pad_value=0.0)
-                lbl2d = center_crop_or_pad_2d(lbl2d, self.target_hw, pad_value=0.0)
+                img2d = deterministic_center_crop_pad_2d(img2d, self.target_hw, pad_value=0.0)
+                lbl2d = deterministic_center_crop_pad_2d(lbl2d, self.target_hw, pad_value=0.0)
                 force_fg = False
             else:
                 # Training: stochastic crop/pad, optional FG centering
                 center_yx = None
                 if force_fg:
-                    center_yx = pick_random_foreground_center(lbl2d, rng=self.rng, thresh=self.fg_threshold)
+                    center_yx = sample_foreground_center_2d(lbl2d, rng=self.rng, thresh=self.fg_threshold)
 
-                params = compute_crop_pad_params_2d(
+                params = compute_stochastic_crop_pad_plan_2d(
                     in_hw=img2d.shape,
                     target_hw=self.target_hw,
                     rng=self.rng,
                     center_yx=center_yx,
                     center_jitter=self.fg_center_jitter,
                 )
-                img2d = apply_crop_pad_2d(img2d, params, pad_value=0.0)
-                lbl2d = apply_crop_pad_2d(lbl2d, params, pad_value=0.0)
+                img2d = apply_crop_pad_plan_2d(img2d, params, pad_value=0.0)
+                lbl2d = apply_crop_pad_plan_2d(lbl2d, params, pad_value=0.0)
 
         elif self.preprocess_mode == "resize":
             th, tw = self.target_hw

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pmseg3d_v2
-#SBATCH --output=logs_v2/pmseg3d_v2_%j.out
-#SBATCH --error=logs_v2/pmseg3d_v2_%j.err
+#SBATCH --output=logs_new/pmseg3d_v2_%j.out
+#SBATCH --error=logs_new/pmseg3d_v2_%j.err
 #SBATCH --time=08:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -25,11 +25,11 @@ echo "venv activated. $(date)"
 # avoid CPU thread oversubscription
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-python scripts/run_train_3d_v3.py \
+python scripts/run_train_3d.py \
   --train_config configs/train_3d/fullinplane_zwindow_translate.yaml \
-  --runs_dir runs_3d_v2 \
+  --runs_dir runs/runs_2d_tests \
   --run_name "v3_adam_fullinplane_${SLURM_JOB_ID}" \
-  --epochs 250 \
+  --epochs 10 \
   --steps_per_epoch 250 \
   --batch_size 2 \
   --model_variant nnunet_fullres \

@@ -35,7 +35,9 @@ export NUMEXPR_NUM_THREADS=1
 
 echo "starting python... $(date)"
 python scripts/run_train_2d.py \
-  --epochs 500 \
+  --train_config /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/configs/train_2d/no_augs.yaml \
+  --runs_dir runs/runs_2d_tests \
+  --epochs 5 \
   --optimizer adam \
   --lr 3e-4 \
   --lr_scheduler cosine \
@@ -43,6 +45,6 @@ python scripts/run_train_2d.py \
   --num_workers 4 \
   --w_bce 1.0 \
   --w_dice 1.5 \
-  --preprocess_mode resize
+  --preprocess_mode crop_pad
 
 echo "job finished: $(date)"

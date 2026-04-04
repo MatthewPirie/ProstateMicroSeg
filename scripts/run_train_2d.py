@@ -8,46 +8,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # allow: from src.
 
 import argparse
 import json
-import subprocess
 import time
-from datetime import datetime
+import yaml
 
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from src.data.dataset_2d import MicroUS2DSlicePatchDataset
+from src.data.dataset_2d import MicroUS2DSliceDataset
 from src.data.dataset_cases import MicroUSCaseDataset
 from src.data.samplers_2d import OversampleForegroundBatchSampler
 from src.models.monai_unet_2d import build_monai_unet_2d
 from src.train.losses import CompoundBCEDiceLoss
-from src.utils.metrics import dice_soft_from_logits, dice_hard_from_logits
+from src.utils.metrics import soft_dice_score, hard_dice_score
 
-from src.train.trainer_2d import train_one_epoch as train_one_epoch_2d
-from src.train.trainer_2d import save_checkpoint as save_checkpoint_2d
-
+from src.train.trainer_2d import train_one_epoch_2d
 from src.train.trainer_2d import validate_case_level_2d
+from src.utils.helper_functions import save_checkpoint, _get_git_commit, _make_run_dir
 
 
-def _get_git_commit() -> str:
-    try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        return "NO_GIT_REPO"
-
-
-def _make_run_dir(base_dir: str, run_name: str) -> Path:
-    base = Path(base_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    run_dir = (base / run_name) if run_name else (base / datetime.now().strftime("%Y%m%d_%H%M%S"))
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
-def main() -> None:
-    torch.set_num_threads(1)
-
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+
+    # Config
+    parser.add_argument("--train_config", type=str, default="/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/configs/train_2d/no_augs.yaml")
 
     # Data paths
     parser.add_argument(
@@ -89,7 +73,6 @@ def main() -> None:
     parser.add_argument("--steps_per_epoch", type=int, default=588)
     parser.add_argument("--preprocess_mode", type=str, default="crop_pad")
 
-
     # Optimizer / LR schedule
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
@@ -117,7 +100,28 @@ def main() -> None:
     parser.add_argument("--target_w", type=int, default=1408)
     parser.add_argument("--transpose_hw", action="store_true")  # default False unless set
 
+    return parser
+
+
+def main() -> None:
+    torch.set_num_threads(1)
+
+    parser = build_parser()
     args = parser.parse_args()
+
+    # -------------------------
+    # Load training config (YAML)
+    # -------------------------
+
+    train_config_path = Path(args.train_config)
+    if not train_config_path.exists():
+        raise FileNotFoundError(f"train_config not found: {train_config_path}")
+
+    with open(train_config_path, "r") as f:
+        train_cfg = yaml.safe_load(f) or {}
+
+    augmentations_cfg = train_cfg.get("augmentations", {})
+    enabled_augs = list(augmentations_cfg.get("enabled", []))
 
     # Resolve case stats path if requested
     data_root = Path(args.data_root)
@@ -131,8 +135,9 @@ def main() -> None:
     writer = SummaryWriter(log_dir=str(tb_dir))
 
     print("Run dir:", run_dir, flush=True)
+    print(f"Train config: {args.train_config or '(none)'}", flush=True)
+    print(f"Enabled augmentations: {enabled_augs}", flush=True)
 
-    cfg = vars(args).copy()
     with open(run_dir / "git_commit.txt", "w") as f:
         f.write(_get_git_commit() + "\n")
 
@@ -149,7 +154,7 @@ def main() -> None:
     preprocess_mode = args.preprocess_mode
 
     # Datasets
-    train_ds = MicroUS2DSlicePatchDataset(
+    train_ds = MicroUS2DSliceDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
         split="train",
@@ -159,7 +164,8 @@ def main() -> None:
         deterministic=False,
         do_augment=True,
         augment_seed=0,
-        preprocess_mode=preprocess_mode
+        preprocess_mode=preprocess_mode,
+        enabled_augs=enabled_augs,
     )
 
     val_ds = MicroUSCaseDataset(
@@ -206,7 +212,6 @@ def main() -> None:
     # Model
     model, model_meta = build_monai_unet_2d(in_channels=1, out_channels=1, variant=args.model_variant)
     model = model.to(device)
-    cfg["model"] = model_meta
 
     # Loss
     criterion = CompoundBCEDiceLoss(
@@ -245,8 +250,15 @@ def main() -> None:
             lr_lambda=lambda step: (1 - min(step, total_steps) / max(total_steps, 1)) ** 0.9,
         )
 
+    run_config = {
+        "cli_args": vars(args),
+        "train_config": train_cfg,
+        "model": model_meta,
+        "target_hw": list(target_hw),
+        "case_stats_path": case_stats_path,
+    }
     with open(run_dir / "config.json", "w") as f:
-        json.dump(cfg, f, indent=2)
+        json.dump(run_config, f, indent=2)
 
     # Resume
     start_epoch = 1
@@ -298,8 +310,8 @@ def main() -> None:
             val_loader=val_loader,
             criterion=criterion,
             device=device,
-            dice_soft_fn=lambda lg, y: dice_soft_from_logits(lg, y, batch_dice=args.batch_dice),
-            dice_hard_fn=dice_hard_from_logits,
+            dice_soft_fn=lambda lg, y: soft_dice_score(lg, y, batch_dice=args.batch_dice),
+            dice_hard_fn=hard_dice_score,
             epoch=epoch,
             target_hw=target_hw,
             slice_batch_size=int(8),
@@ -329,43 +341,42 @@ def main() -> None:
             f.write(json.dumps(record) + "\n")
 
         # Checkpointing
+        checkpoint_extra = {
+            "best_val_dice_thr05": best_val,
+            "train_metrics": train_metrics,
+            "val_metrics": val_metrics,
+            "cli_args": vars(args),
+            "train_config": train_cfg,
+        }
+
         if args.save_last:
-            save_checkpoint_2d(
+            save_checkpoint(
                 ckpt_path=run_dir / "checkpoint_last.pt",
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                extra={
-                    "best_val_dice_thr05": best_val,
-                    "train_metrics": train_metrics,
-                    "val_metrics": val_metrics,
-                    "args": vars(args),
-                },
+                extra=checkpoint_extra,
             )
 
         if args.save_best and val_metrics["val_dice_thr05"] > best_val:
             best_val = float(val_metrics["val_dice_thr05"])
-            save_checkpoint_2d(
+            checkpoint_extra["best_val_dice_thr05"] = best_val
+            save_checkpoint(
                 ckpt_path=run_dir / "checkpoint_best.pt",
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                extra={
-                    "best_val_dice_thr05": best_val,
-                    "train_metrics": train_metrics,
-                    "val_metrics": val_metrics,
-                    "args": vars(args),
-                },
+                extra=checkpoint_extra,
             )
             print(f"[Epoch {epoch}] New best VAL Dice(thr=0.5)={best_val:.4f} -> saved checkpoint_best.pt", flush=True)
 
         if args.save_every and (epoch % args.save_every == 0):
-            save_checkpoint_2d(
+            save_checkpoint(
                 ckpt_path=run_dir / f"checkpoint_epoch{epoch:04d}.pt",
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                extra={"train_metrics": train_metrics, "val_metrics": val_metrics, "args": vars(args)},
+                extra=checkpoint_extra,
             )
 
     print("Finished. Metrics:", metrics_path, flush=True)

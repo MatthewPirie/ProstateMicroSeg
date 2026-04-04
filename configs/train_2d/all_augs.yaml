@@ -1,0 +1,10 @@
+augmentations:
+  enabled:
+    - flip
+    - affine
+    - elastic
+    - noise
+    - smooth
+    - shift_intensity
+    - scale_intensity
+    - contrast
