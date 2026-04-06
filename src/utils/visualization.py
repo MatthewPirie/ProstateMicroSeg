@@ -24,6 +24,33 @@ def _dice_2d(pred01: np.ndarray, gt01: np.ndarray, eps: float = 1e-8) -> float:
     return (2.0 * inter + eps) / (denom + eps)
 
 
+def _resize_2d_np(arr: np.ndarray, target_hw: Tuple[int, int], mode: str = "nearest") -> np.ndarray:
+    """
+    Resize a 2D (H, W) grayscale or (H, W, C) RGB numpy array to target_hw using torch.
+    """
+    th, tw = int(target_hw[0]), int(target_hw[1])
+    if arr.ndim == 2:
+        h, w = arr.shape
+        if h == th and w == tw:
+            return arr
+        t = torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+        interp_mode = "nearest" if mode == "nearest" else "bilinear"
+        kwargs: dict = {} if interp_mode == "nearest" else {"align_corners": False}
+        out = F.interpolate(t, size=(th, tw), mode=interp_mode, **kwargs)
+        return out[0, 0].numpy()
+    elif arr.ndim == 3:  # (H, W, C) – RGB overlay
+        h, w, c = arr.shape
+        if h == th and w == tw:
+            return arr
+        t = torch.from_numpy(arr.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)  # [1,C,H,W]
+        interp_mode = "nearest" if mode == "nearest" else "bilinear"
+        kwargs = {} if interp_mode == "nearest" else {"align_corners": False}
+        out = F.interpolate(t, size=(th, tw), mode=interp_mode, **kwargs)
+        return out[0].permute(1, 2, 0).numpy()
+    else:
+        raise ValueError(f"Expected 2D or 3D array, got shape {arr.shape}")
+
+
 def _overlay_yellow(base01: np.ndarray, mask01: np.ndarray, alpha: float = 0.35) -> np.ndarray:
     """
     base01: 2D float image in [0,1]
@@ -148,8 +175,12 @@ def _infer_full_volume_logits_fullinplane(
     )
 
     if img_rs.shape[2] < z_window:
-        raise RuntimeError(
-            f"Case has Z={img_rs.shape[2]} which is smaller than roi_size[0]={z_window}."
+        import warnings
+        warnings.warn(
+            f"Case has Z={img_rs.shape[2]} which is smaller than roi_size[0]={z_window}. "
+            "MONAI will pad the volume to fit the window and crop back — prediction covers all slices.",
+            RuntimeWarning,
+            stacklevel=2,
         )
 
     mode = "gaussian" if gaussian else "constant"
@@ -294,3 +325,208 @@ def save_val_case_slice_grid_png(
     plt.close(fig)
 
     return float(dice)
+
+
+@torch.no_grad()
+def save_val_volume_all_slices_2d_png(
+    *,
+    model: torch.nn.Module,
+    img: torch.Tensor,       # [1,1,Z,Y,X]
+    lbl: torch.Tensor,       # [1,1,Z,Y,X]
+    out_png: "str | Path",
+    target_hw: Tuple[int, int],
+    thr: float = 0.5,
+    slice_batch_size: int = 8,
+    amp: bool = False,
+) -> None:
+    """
+    Runs 2D inference on every Z-slice of a single validation volume and saves a
+    multi-row PNG (one row per slice): [image | GT | pred | pred_overlay(Dice)].
+
+    Preprocessing matches validate_case_level_2d: deterministic centre crop/pad to
+    target_hw before inference so the model sees identical spatial dimensions.
+    """
+    from src.data.transforms_3d import deterministic_center_crop_pad_3d_torch
+    import matplotlib.pyplot as plt
+
+    out_png = Path(out_png)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+
+    model.eval()
+    device = img.device
+
+    # Preserve original spatial dims for display
+    orig_hw = (int(img.shape[3]), int(img.shape[4]))
+
+    # [1,1,Z,Y,X] -> [Z,1,Y,X]; crop/pad on CPU (matches trainer pre-processing)
+    img2d = img.cpu().squeeze(0).permute(1, 0, 2, 3).contiguous()
+    lbl2d = lbl.cpu().squeeze(0).permute(1, 0, 2, 3).contiguous()
+
+    img2d = deterministic_center_crop_pad_3d_torch(img2d, target_hw, pad_value=0.0)
+    lbl2d = deterministic_center_crop_pad_3d_torch(lbl2d, target_hw, pad_value=0.0)
+
+    img2d = img2d.float().to(device)
+    lbl2d = lbl2d.float().to(device)
+
+    Z = img2d.shape[0]
+    use_amp = bool(amp) and torch.cuda.is_available() and img2d.is_cuda
+
+    logits_chunks = []
+    with torch.cuda.amp.autocast(enabled=use_amp):
+        for start in range(0, Z, slice_batch_size):
+            logits_chunks.append(model(img2d[start : start + slice_batch_size]))
+    logits2d = torch.cat(logits_chunks, dim=0)  # [Z,1,H,W]
+
+    img_np  = img2d.cpu().float().numpy()[:, 0]   # [Z,H,W]
+    lbl_np  = lbl2d.cpu().float().numpy()[:, 0]
+    prob_np = torch.sigmoid(logits2d).cpu().float().numpy()[:, 0]
+    pred_np = (prob_np >= float(thr)).astype(np.uint8)
+
+
+    col_w_in = 2.0
+    row_h_in = 2.0
+    fig, axes = plt.subplots(Z, 4, figsize=(4 * col_w_in, Z * row_h_in), squeeze=False)
+
+    for z in range(Z):
+        base   = img_np[z]
+        base01 = (base - base.min()) / (base.max() - base.min() + 1e-8)
+        gt     = (lbl_np[z] > 0.5).astype(np.uint8)
+        pr     = pred_np[z]
+        # Compute dice at model resolution before resizing
+        dice   = _dice_2d(pr, gt)
+
+        # Resize all arrays back to original spatial dimensions for display
+        base01_disp = _resize_2d_np(base01, orig_hw, mode="bilinear")
+        gt_disp     = _resize_2d_np(gt.astype(np.float32), orig_hw, mode="nearest")
+        pr_disp     = _resize_2d_np(pr.astype(np.float32), orig_hw, mode="nearest")
+        ov_disp     = _overlay_yellow(base01_disp, pr_disp, alpha=0.35)
+
+        axes[z, 0].imshow(base01_disp, cmap="gray")
+        axes[z, 1].imshow(gt_disp, cmap="gray")
+        axes[z, 2].imshow(pr_disp, cmap="gray")
+        axes[z, 3].imshow(ov_disp)
+
+        axes[z, 0].set_title(f"z={z}  Dice={dice:.3f}", fontsize=6, pad=1)
+
+        for ax in axes[z]:
+            ax.axis("off")
+
+    # Column headers on top row
+    for col, label in enumerate(["Image", "GT", "Pred", "Overlay"]):
+        existing = axes[0, col].get_title()
+        axes[0, col].set_title(
+            f"{label}\n{existing}" if existing else label, fontsize=7, pad=2
+        )
+
+    fig.tight_layout(pad=0.3)
+    fig.savefig(str(out_png), bbox_inches="tight")
+    plt.close(fig)
+
+
+@torch.no_grad()
+def save_val_volume_all_slices_3d_png(
+    *,
+    model: torch.nn.Module,
+    img: torch.Tensor,       # [1,1,Z,Y,X]
+    lbl: torch.Tensor,       # [1,1,Z,Y,X]
+    out_png: "str | Path",
+    roi_size: Tuple[int, int, int],
+    vis_mode: str = "slidingwindow",  # "slidingwindow" | "fullinplane"
+    thr: float = 0.5,
+    overlap: float = 0.5,
+    sw_batch_size: int = 1,
+    gaussian: bool = True,
+    amp: bool = True,
+) -> None:
+    """
+    Runs full-volume 3D inference on a single validation case and saves a multi-row
+    PNG (one row per Z-slice): [image | GT | pred | pred_overlay(Dice)].
+
+    vis_mode must match the extractor used during training:
+      "slidingwindow"  – raw MONAI sliding-window inference on the original volume.
+      "fullinplane"    – XY resized to roi_size[1:] first, then sliding-window.
+    """
+    import matplotlib.pyplot as plt
+
+    out_png = Path(out_png)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+
+    model.eval()
+
+    # Preserve original spatial dims for display
+    orig_hw = (int(img.shape[3]), int(img.shape[4]))
+
+    if vis_mode == "slidingwindow":
+        logits = _infer_full_volume_logits_slidingwindow(
+            model=model,
+            img=img,
+            roi_size=roi_size,
+            overlap=overlap,
+            sw_batch_size=sw_batch_size,
+            gaussian=gaussian,
+            amp=amp,
+        )
+        img_vis = img
+        lbl_vis = lbl
+    elif vis_mode == "fullinplane":
+        logits, img_vis = _infer_full_volume_logits_fullinplane(
+            model=model,
+            img=img,
+            roi_size=roi_size,
+            overlap=overlap,
+            sw_batch_size=sw_batch_size,
+            gaussian=gaussian,
+            amp=amp,
+        )
+        lbl_vis = _resize_xy_only_5d(
+            lbl.float(), (int(roi_size[1]), int(roi_size[2])), mode="nearest"
+        )
+        lbl_vis = (lbl_vis > 0.5).float()
+    else:
+        raise ValueError(f"Unsupported vis_mode: {vis_mode!r}")
+
+    img_np  = img_vis.detach().float().cpu().numpy()[0, 0]   # [Z,Y,X]
+    lbl_np  = lbl_vis.detach().float().cpu().numpy()[0, 0]
+    prob_np = torch.sigmoid(logits).detach().float().cpu().numpy()[0, 0]
+    pred_np = (prob_np >= float(thr)).astype(np.uint8)
+
+    Z = img_np.shape[0]
+
+    col_w_in = 2.0
+    row_h_in = 2.0
+    fig, axes = plt.subplots(Z, 4, figsize=(4 * col_w_in, Z * row_h_in), squeeze=False)
+
+    for z in range(Z):
+        base   = img_np[z]
+        base01 = (base - base.min()) / (base.max() - base.min() + 1e-8)
+        gt     = (lbl_np[z] > 0.5).astype(np.uint8)
+        pr     = pred_np[z]
+        # Compute dice at model resolution before resizing
+        dice   = _dice_2d(pr, gt)
+
+        # Resize all arrays back to original spatial dimensions for display
+        base01_disp = _resize_2d_np(base01, orig_hw, mode="bilinear")
+        gt_disp     = _resize_2d_np(gt.astype(np.float32), orig_hw, mode="nearest")
+        pr_disp     = _resize_2d_np(pr.astype(np.float32), orig_hw, mode="nearest")
+        ov_disp     = _overlay_yellow(base01_disp, pr_disp, alpha=0.35)
+
+        axes[z, 0].imshow(base01_disp, cmap="gray")
+        axes[z, 1].imshow(gt_disp, cmap="gray")
+        axes[z, 2].imshow(pr_disp, cmap="gray")
+        axes[z, 3].imshow(ov_disp)
+
+        axes[z, 0].set_title(f"z={z}  Dice={dice:.3f}", fontsize=14, pad=4)
+
+        for ax in axes[z]:
+            ax.axis("off")
+
+    # Column headers on top row
+    for col, label in enumerate(["Image", "GT", "Pred", "Overlay"]):
+        existing = axes[0, col].get_title()
+        axes[0, col].set_title(
+            f"{label}\n{existing}" if existing else label, fontsize=10, pad=2
+        )
+
+    fig.tight_layout(pad=0.3)
+    fig.savefig(str(out_png), bbox_inches="tight")
+    plt.close(fig)

@@ -1,0 +1,7 @@
+extractor:
+  name: full_inplane_zwindow
+  kwargs: {}
+
+augmentations:
+  enabled:
+    - translate

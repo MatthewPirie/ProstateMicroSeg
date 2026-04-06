@@ -1,5 +1,4 @@
 augmentations:
   enabled:
-    - flip
-    - affine
+    - translate
 

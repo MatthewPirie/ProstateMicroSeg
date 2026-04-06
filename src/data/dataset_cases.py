@@ -176,8 +176,13 @@ class MicroUSCaseDataset(Dataset):
         lbl_np = (lbl_np > self.fg_threshold).astype(np.float32)
 
         # Convert to torch tensors, add channel dim: [C, Z, Y, X]
-        img_t = torch.from_numpy(img_np).unsqueeze(0).float()
-        lbl_t = torch.from_numpy(lbl_np).unsqueeze(0).float()
+        img_t = torch.from_numpy(
+            np.array(img_np, dtype=np.float32, copy=True, order="C")
+        ).unsqueeze(0)
+
+        lbl_t = torch.from_numpy(
+            np.array(lbl_np, dtype=np.float32, copy=True, order="C")
+        ).unsqueeze(0)
 
         return {
             "image": img_t,

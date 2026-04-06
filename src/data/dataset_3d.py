@@ -186,8 +186,8 @@ class MicroUS3DDataset(Dataset):
         lbl_out = (lbl_out > self.fg_threshold).astype(np.float32)
 
         # To torch, channel-first: [C,Z,Y,X]
-        img_t = torch.from_numpy(img_out).unsqueeze(0).float()
-        lbl_t = torch.from_numpy(lbl_out).unsqueeze(0).float()
+        img_t = torch.from_numpy(np.ascontiguousarray(img_out, dtype=np.float32)).unsqueeze(0)
+        lbl_t = torch.from_numpy(np.ascontiguousarray(lbl_out, dtype=np.float32)).unsqueeze(0)
 
         sample: Dict[str, Any] = {
             "image": img_t,

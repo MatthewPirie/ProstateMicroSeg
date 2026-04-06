@@ -64,7 +64,7 @@ def _resize_xy_slicewise(
     if y == target_y and x == target_x:
         return vol
 
-    vol_t = torch.from_numpy(vol).unsqueeze(1).float()  # [Z, 1, Y, X]
+    vol_t = torch.from_numpy(vol.copy()).unsqueeze(1).float()                                                                                         
 
     if mode == "nearest":
         out_t = F.interpolate(

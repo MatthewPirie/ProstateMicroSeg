@@ -21,6 +21,17 @@ def build_train_transforms_2d(
     target_hw: Tuple[int, int],
     enabled_augs: Sequence[str] | None = None,
     seed: Optional[int] = None,
+    flip_prob: float = 0.5,
+    translate_prob: float = 0.15,
+    rotate_scale_prob: float = 0.15,
+    noise_prob: float = 0.10,
+    smooth_prob: float = 0.20,
+    shift_prob: float = 0.15,
+    scale_prob: float = 0.15,
+    contrast_prob: float = 0.20,
+    translate_range: Tuple[float, float] = (20.0, 20.0),
+    rotate_range: float = 0.350,
+    scale_range: Tuple[float, float] = (0.2, 0.2),
 ) -> Compose:
     """
     Returns a MONAI Compose that expects a dict:
@@ -31,7 +42,8 @@ def build_train_transforms_2d(
 
     enabled_augs controls which augmentations are active. Recognised names:
       flip             - left-right and up-down flips (p=0.5 each)
-      affine           - random rotation +-20 deg + scale [0.8, 1.2] (p=0.15)
+      translate        - random translation in H/W (p=0.15)
+      rotate_scale     - random rotation +-20 deg + scale [0.8, 1.2] (p=0.15)
       elastic          - 2D elastic deformation (p=0.10)
       noise            - Gaussian noise (p=0.10)
       smooth           - Gaussian smoothing (p=0.20)
@@ -46,16 +58,28 @@ def build_train_transforms_2d(
 
     # Spatial
     if "flip" in enabled:
-        transforms.append(RandFlipd(keys=("image", "label"), prob=0.5, spatial_axis=1))  # left-right
-        transforms.append(RandFlipd(keys=("image", "label"), prob=0.5, spatial_axis=0))  # up-down
+        transforms.append(RandFlipd(keys=("image", "label"), prob=flip_prob, spatial_axis=1))  # left-right
+        transforms.append(RandFlipd(keys=("image", "label"), prob=flip_prob, spatial_axis=0))  # up-down
 
-    if "affine" in enabled:
+    if "translate" in enabled:
         transforms.append(
             RandAffined(
                 keys=("image", "label"),
-                prob=0.15,
-                rotate_range=(0.350,),       # +/- 20 degrees
-                scale_range=(0.2, 0.2),      # approx [0.8, 1.2]
+                prob=translate_prob,
+                translate_range=(translate_range[0], translate_range[1]),
+                mode=("bilinear", "nearest"),
+                padding_mode="zeros",
+                spatial_size=target_hw,
+            )
+        )
+
+    if "rotate_scale" in enabled:
+        transforms.append(
+            RandAffined(
+                keys=("image", "label"),
+                prob=rotate_scale_prob,
+                rotate_range=(rotate_range,),
+                scale_range=(scale_range[0], scale_range[1]),
                 mode=("bilinear", "nearest"),
                 padding_mode="zeros",
                 spatial_size=target_hw,
@@ -76,26 +100,26 @@ def build_train_transforms_2d(
 
     # Intensity (image only)
     if "noise" in enabled:
-        transforms.append(RandGaussianNoised(keys="image", prob=0.10, mean=0.0, std=0.03))
+        transforms.append(RandGaussianNoised(keys="image", prob=noise_prob, mean=0.0, std=0.03))
 
     if "smooth" in enabled:
         transforms.append(
             RandGaussianSmoothd(
                 keys="image",
-                prob=0.20,
+                prob=smooth_prob,
                 sigma_x=(0.5, 1.0),
                 sigma_y=(0.5, 1.0),
             )
         )
 
     if "shift_intensity" in enabled:
-        transforms.append(RandShiftIntensityd(keys="image", prob=0.15, offsets=(-0.05, 0.05)))
+        transforms.append(RandShiftIntensityd(keys="image", prob=shift_prob, offsets=(-0.05, 0.05)))
 
     if "scale_intensity" in enabled:
-        transforms.append(RandScaleIntensityd(keys="image", prob=0.15, factors=(0.75, 1.25)))
+        transforms.append(RandScaleIntensityd(keys="image", prob=scale_prob, factors=(0.75, 1.25)))
 
     if "contrast" in enabled:
-        transforms.append(RandAdjustContrastd(keys="image", prob=0.20, gamma=(0.7, 1.5)))
+        transforms.append(RandAdjustContrastd(keys="image", prob=contrast_prob, gamma=(0.7, 1.5)))
 
     t = Compose(transforms)
 

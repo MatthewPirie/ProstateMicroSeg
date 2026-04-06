@@ -1,4 +1,4 @@
-# ProstateMicroSeg/scripts/run_train_3d.py
+# ProstateMicroSeg/scripts/run_train_convlstm.py
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # allow: from src.
 import argparse
 import json
 import time
-from itertools import islice
 import yaml
 
 import torch
@@ -22,20 +21,18 @@ from src.data.dataset_cases import MicroUSCaseDataset
 from src.data.samplers_3d import OversampleForegroundBatchSampler3D
 from src.data.augmentations_3d import build_train_transforms_3d
 
-from src.models.monai_unet_3d import build_monai_unet_3d
+from src.models.convlstm_segmentation import build_segmentation_convlstm
 from src.train.losses import CompoundBCEDiceLoss
 
 from src.utils.metrics import soft_dice_score, hard_dice_score
 from src.utils.visualization import save_val_volume_all_slices_3d_png
 
-from src.train.trainer_3d import (
-    train_one_epoch,
-    validate_patches_3d,
-    validate_cases_slidingwindow_3d,
-    validate_cases_fullinplane_3d,
+from src.train.trainer_convlstm import (
+    train_one_epoch_convlstm,
+    validate_patches_convlstm,
+    validate_cases_convlstm,
 )
-from src.utils.helper_functions import _get_git_commit, _make_run_dir
-from src.utils.helper_functions import save_checkpoint
+from src.utils.helper_functions import _get_git_commit, _make_run_dir, save_checkpoint
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,27 +55,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--data_root",
         type=str,
         default="/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/dataset/processed/Dataset120_MicroUSProstate",
-        help="Processed dataset root with imagesTr/labelsTr/imagesTs/labelsTs (.npy).",
     )
     parser.add_argument(
         "--splits_dir",
         type=str,
         default="/home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/dataset/splits",
-        help="Directory containing train.txt/val.txt/test.txt.",
     )
-    parser.add_argument(
-        "--case_stats_path",
-        type=str,
-        default="",
-        help="Path to case_stats.json. If empty, defaults to <data_root>/case_stats.json.",
-    )
+    parser.add_argument("--case_stats_path", type=str, default="")
     parser.add_argument("--use_case_stats", action="store_true", default=True)
     parser.add_argument("--no_use_case_stats", action="store_false", dest="use_case_stats")
 
     # -------------------------
     # Run / logging
     # -------------------------
-    parser.add_argument("--runs_dir", type=str, default="runs_3d_v2")
+    parser.add_argument("--runs_dir", type=str, default="runs_convlstm")
     parser.add_argument("--run_name", type=str, default="")
     parser.add_argument("--save_last", action="store_true", default=True)
     parser.add_argument("--no_save_last", action="store_false", dest="save_last")
@@ -90,14 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
     # -------------------------
     # Training setup
     # -------------------------
-    parser.add_argument("--model_variant", type=str, default="nnunet_fullres", choices=["nnunet_fullres", "small"])
+    parser.add_argument(
+        "--model_variant",
+        type=str,
+        default="base",
+        choices=["small", "base", "large"],
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--steps_per_epoch", type=int, default=250)
     parser.add_argument("--log_every", type=int, default=100)
 
-    # Patch size (ZYX)
-    parser.add_argument("--patch_z", type=int, default=14)
+    # Patch size (ZYX) — Z is the temporal window for the ConvLSTM
+    parser.add_argument("--patch_z", type=int, default=16)
     parser.add_argument("--patch_y", type=int, default=256)
     parser.add_argument("--patch_x", type=int, default=448)
 
@@ -108,7 +103,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="probabilistic",
         choices=["probabilistic", "deterministic"],
-        help="How force_fg is assigned inside each batch.",
     )
     parser.add_argument("--fg_thr", type=float, default=0.5)
 
@@ -120,7 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--momentum", type=float, default=0.99)
     parser.add_argument("--weight_decay", type=float, default=3e-5)
 
-    parser.add_argument("--lr_scheduler", type=str, default="polynomial", choices=["none", "cosine", "polynomial"])
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="polynomial",
+        choices=["none", "cosine", "polynomial"],
+    )
     parser.add_argument("--poly_power", type=float, default=0.9)
     parser.add_argument("--min_lr", type=float, default=1e-6)
 
@@ -138,25 +137,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--amp", action="store_true", default=True)
     parser.add_argument("--no_amp", action="store_false", dest="amp")
+    parser.add_argument(
+        "--grad_clip_norm",
+        type=float,
+        default=1.0,
+        help="Max gradient norm for clipping. Set <= 0 to disable.",
+    )
 
     # -------------------------
     # Validation
     # -------------------------
     parser.add_argument("--num_val_steps", type=int, default=50)
-    parser.add_argument("--fullval_every", type=int, default=50, help="Run full-volume SW val every N epochs. 0=never.")
-    parser.add_argument("--fullval_cases", type=int, default=1, help="Currently unused.")
+    parser.add_argument(
+        "--fullval_every",
+        type=int,
+        default=50,
+        help="Run full-volume case validation every N epochs. 0=never.",
+    )
     parser.add_argument("--val_overlap", type=float, default=0.5)
     parser.add_argument("--val_gaussian", action="store_true", default=True)
     parser.add_argument("--no_val_gaussian", action="store_false", dest="val_gaussian")
     parser.add_argument("--sw_batch_size", type=int, default=1)
+    parser.add_argument(
+        "--val_carryover",
+        action="store_true",
+        default=False,
+        help="Thread ConvLSTM hidden state across Z windows during case-level validation.",
+    )
 
     return parser
+
 
 def main() -> None:
     torch.set_num_threads(1)
 
     parser = build_parser()
     args = parser.parse_args()
+
     # -------------------------
     # Run directory + metadata
     # -------------------------
@@ -180,7 +197,7 @@ def main() -> None:
     pin_memory = torch.cuda.is_available() and args.num_workers > 0
     scaler = torch.amp.GradScaler(
         "cuda",
-        enabled=(torch.cuda.is_available() and bool(args.amp))
+        enabled=(torch.cuda.is_available() and bool(args.amp)),
     )
 
     # -------------------------
@@ -199,18 +216,9 @@ def main() -> None:
     extractor_cfg = train_cfg.get("extractor", {})
     aug_cfg = train_cfg.get("augmentations", {})
 
-    extractor_name = str(extractor_cfg.get("name", "patch_centered_fg"))
+    extractor_name = str(extractor_cfg.get("name", "full_inplane_zwindow"))
     extractor_kwargs = dict(extractor_cfg.get("kwargs", {}))
     enabled_augs = list(aug_cfg.get("enabled", []))
-
-    FULL_INPLANE_EXTRACTORS = {"full_inplane_zwindow"}
-
-    if extractor_name in FULL_INPLANE_EXTRACTORS:
-        case_val_fn = validate_cases_fullinplane_3d
-        case_vis_mode = "fullinplane"
-    else:
-        case_val_fn = validate_cases_slidingwindow_3d
-        case_vis_mode = "slidingwindow"
 
     print(f"Train config: {train_config_path}", flush=True)
     print(f"Extractor: {extractor_name}", flush=True)
@@ -266,7 +274,6 @@ def main() -> None:
         extractor_kwargs=extractor_kwargs,
     )
 
-    # Val cases (full-volume SW eval) — full volumes
     val_case_ds = MicroUSCaseDataset(
         dataset_root=args.data_root,
         splits_dir=args.splits_dir,
@@ -333,17 +340,24 @@ def main() -> None:
     print(f"Patch ZYX: {patch_zyx} | batch={args.batch_size} steps/epoch={steps_per_epoch}", flush=True)
     print(f"Oversample FG: p={args.oversample_fg} mode={args.oversample_mode}", flush=True)
     print(
-        f"Online val: num_val_steps={args.num_val_steps} | Fullval: every={args.fullval_every} cases={args.fullval_cases}",
+        f"Online val: num_val_steps={args.num_val_steps} | "
+        f"Fullval: every={args.fullval_every} | "
+        f"val_carryover={args.val_carryover}",
         flush=True,
     )
-    print(f"Extractor: {extractor_name}", flush=True)
-    print(f"Extractor kwargs: {extractor_kwargs}", flush=True)
-    
+
     # -------------------------
     # Model
     # -------------------------
-    model, model_meta = build_monai_unet_3d(in_channels=1, out_channels=1, variant=args.model_variant)
+    model, model_meta = build_segmentation_convlstm(
+        in_channels=1,
+        out_channels=1,
+        variant=args.model_variant,
+    )
     model = model.to(device)
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model: SegmentationConvLSTM variant={args.model_variant} | params={total_params:,}", flush=True)
 
     # -------------------------
     # Loss
@@ -358,7 +372,11 @@ def main() -> None:
     # Optimizer
     # -------------------------
     if args.optimizer == "adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=float(args.lr),
+            weight_decay=float(args.weight_decay),
+        )
     else:
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -381,7 +399,6 @@ def main() -> None:
     elif args.lr_scheduler == "polynomial":
         power = float(args.poly_power)
 
-        # DEBUG: hardcoded polynomial decay to reach 0 after 250000 steps so that training on lower epochs doesn't decay to early
         def _poly(step: int) -> float:
             s = min(step, max(total_steps, 1))
             return (1.0 - s / max(total_steps, 1)) ** power
@@ -430,7 +447,7 @@ def main() -> None:
     for epoch in range(start_epoch, start_epoch + int(args.epochs)):
         t0 = time.time()
 
-        train_metrics = train_one_epoch(
+        train_metrics = train_one_epoch_convlstm(
             model=model,
             train_loader=train_loader,
             optimizer=optimizer,
@@ -443,18 +460,16 @@ def main() -> None:
             scheduler=scheduler,
             scaler=scaler,
             amp=bool(args.amp),
+            grad_clip_norm=float(args.grad_clip_norm),
         )
         t1 = time.time()
 
-        # Online patch validation every epoch
-        valp_metrics = validate_patches_3d(
+        valp_metrics = validate_patches_convlstm(
             model=model,
             val_loader=val_patch_loader,
             criterion=criterion,
             device=device,
-            dice_soft_fn=lambda lg, y: soft_dice_score(
-                lg, y, batch_dice=bool(args.batch_dice)
-            ),
+            dice_soft_fn=lambda lg, y: soft_dice_score(lg, y, batch_dice=bool(args.batch_dice)),
             dice_hard_fn=hard_dice_score,
             epoch=epoch,
             num_val_steps=int(args.num_val_steps),
@@ -462,28 +477,25 @@ def main() -> None:
         )
         t2 = time.time()
 
-        # Full-volume validation only every N epochs (ALL val cases)
         fullval_metrics = None
         do_full = int(args.fullval_every) > 0 and (epoch % int(args.fullval_every) == 0)
 
         if do_full:
-            fullval_metrics = case_val_fn(
+            fullval_metrics = validate_cases_convlstm(
                 model=model,
                 val_loader=val_case_loader,
                 criterion=criterion,
                 device=device,
-                dice_soft_fn=lambda lg, y: soft_dice_score(
-                    lg, y, batch_dice=bool(args.batch_dice)
-                ),
+                dice_soft_fn=lambda lg, y: soft_dice_score(lg, y, batch_dice=bool(args.batch_dice)),
                 dice_hard_fn=hard_dice_score,
                 epoch=epoch,
                 roi_size=patch_zyx,
                 overlap=float(args.val_overlap),
                 sw_batch_size=int(args.sw_batch_size),
                 gaussian=bool(args.val_gaussian),
+                use_hidden_carryover=bool(args.val_carryover),
                 pin_memory=pin_memory,
             )
-
         t3 = time.time()
 
         # TensorBoard
@@ -496,9 +508,9 @@ def main() -> None:
         writer.add_scalar("val_patch/dice_soft", valp_metrics["valp_dice_soft"], epoch)
 
         if fullval_metrics is not None:
-            writer.add_scalar("val_case/dice_thr05", fullval_metrics["val_dice_thr05"], epoch)
-            writer.add_scalar("val_case/dice_soft", fullval_metrics["val_dice_soft"], epoch)
             writer.add_scalar("val_case/total_loss", fullval_metrics["val_total_loss"], epoch)
+            writer.add_scalar("val_case/dice_soft", fullval_metrics["val_dice_soft"], epoch)
+            writer.add_scalar("val_case/dice_thr05", fullval_metrics["val_dice_thr05"], epoch)
 
         writer.flush()
 
@@ -509,7 +521,6 @@ def main() -> None:
             flush=True,
         )
 
-        # Record metrics
         record = {
             "epoch": epoch,
             "epoch_sec": float(t3 - t0),
@@ -531,7 +542,6 @@ def main() -> None:
             "train_config": train_cfg,
         }
 
-        # Always save last
         if bool(args.save_last):
             save_checkpoint(
                 ckpt_path=run_dir / "checkpoint_last.pt",
@@ -541,10 +551,8 @@ def main() -> None:
                 extra=checkpoint_extra,
             )
 
-        # Save best based on PATCH validation (nnU-Net-like)
         if bool(args.save_best) and float(valp_metrics["valp_dice_thr05"]) > best_valp:
             best_valp = float(valp_metrics["valp_dice_thr05"])
-
             checkpoint_extra["best_valp_dice_thr05"] = best_valp
 
             save_checkpoint(
@@ -559,7 +567,6 @@ def main() -> None:
                 flush=True,
             )
 
-        # Periodic saving
         if int(args.save_every) > 0 and (epoch % int(args.save_every) == 0):
             save_checkpoint(
                 ckpt_path=run_dir / f"checkpoint_epoch{epoch:04d}.pt",
@@ -584,7 +591,7 @@ def main() -> None:
     model.eval()
 
     vis_item = val_case_ds[0]
-    vis_img = vis_item["image"].unsqueeze(0).to(device)   # [1,1,Z,Y,X]
+    vis_img = vis_item["image"].unsqueeze(0).to(device)
     vis_lbl = vis_item["label"].unsqueeze(0).to(device)
     vis_case_id = vis_item["case_id"]
 
@@ -597,7 +604,7 @@ def main() -> None:
         lbl=vis_lbl,
         out_png=out_png,
         roi_size=patch_zyx,
-        vis_mode=case_vis_mode,
+        vis_mode="fullinplane",
         thr=0.5,
         overlap=float(args.val_overlap),
         sw_batch_size=int(args.sw_batch_size),
@@ -606,7 +613,7 @@ def main() -> None:
     )
 
     print(f"Saved visualization: {out_png}", flush=True)
-    print("Training Completed", flush=True)
+    print("Training complete.", flush=True)
 
     writer.close()
 

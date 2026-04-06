@@ -25,6 +25,7 @@ from src.utils.metrics import soft_dice_score, hard_dice_score
 from src.train.trainer_2d import train_one_epoch_2d
 from src.train.trainer_2d import validate_case_level_2d
 from src.utils.helper_functions import save_checkpoint, _get_git_commit, _make_run_dir
+from src.utils.visualization import save_val_volume_all_slices_2d_png
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -322,7 +323,10 @@ def main() -> None:
 
         # TensorBoard
         writer.add_scalar("train/total_loss", train_metrics["train_total_loss"], epoch)
+        writer.add_scalar("train/bce", train_metrics["train_bce"], epoch)
+        writer.add_scalar("train/dice_loss", train_metrics["train_dice_loss"], epoch)
         writer.add_scalar("val/total_loss", val_metrics["val_total_loss"], epoch)
+        writer.add_scalar("val/dice_soft", val_metrics["val_dice_soft"], epoch)
         writer.add_scalar("val/dice_thr05", val_metrics["val_dice_thr05"], epoch)
         writer.flush()
 
@@ -333,9 +337,8 @@ def main() -> None:
         record = {
             "epoch": epoch,
             "epoch_sec": epoch_sec,
-            "train_total_loss": train_metrics["train_total_loss"],
-            "val_total_loss": val_metrics["val_total_loss"],
-            "val_dice_thr05": val_metrics["val_dice_thr05"],
+            **train_metrics,
+            **val_metrics,
         }
         with open(metrics_path, "a") as f:
             f.write(json.dumps(record) + "\n")
@@ -378,6 +381,32 @@ def main() -> None:
                 epoch=epoch,
                 extra=checkpoint_extra,
             )
+
+    # --- Final visualization: all slices of one validation case ---
+    print("Running final visualization on validation case...", flush=True)
+    model.eval()
+
+    vis_batch = next(iter(val_loader))
+    vis_img = vis_batch["image"].to(device)
+    vis_lbl = vis_batch["label"].to(device)
+    vis_case_id = vis_batch["case_id"]
+    if isinstance(vis_case_id, (list, tuple)):
+        vis_case_id = vis_case_id[0]
+
+    vis_dir = run_dir / "vis"
+    out_png = vis_dir / f"final_{vis_case_id}_all_slices.png"
+
+    save_val_volume_all_slices_2d_png(
+        model=model,
+        img=vis_img,
+        lbl=vis_lbl,
+        out_png=out_png,
+        target_hw=target_hw,
+        thr=0.5,
+        slice_batch_size=8,
+        amp=False,
+    )
+    print(f"Saved visualization: {out_png}", flush=True)
 
     print("Finished. Metrics:", metrics_path, flush=True)
     writer.close()

@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=pmseg2d
-#SBATCH --output=logs_new/pmseg2d_%j.out
-#SBATCH --error=logs_new/pmseg2d_%j.err
-#SBATCH --time=02:00:00
+#SBATCH --output=a_logs/pmseg2d_%j.out
+#SBATCH --error=a_logs/pmseg2d_%j.err
+#SBATCH --time=08:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -35,9 +35,11 @@ export NUMEXPR_NUM_THREADS=1
 
 echo "starting python... $(date)"
 python scripts/run_train_2d.py \
-  --train_config /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/configs/train_2d/no_augs.yaml \
-  --runs_dir runs/runs_2d_tests \
-  --epochs 5 \
+  --train_config /home/pirie03/projects/aip-medilab/pirie03/ProstateMicroSeg/configs/train_2d/spatial_only.yaml \
+  --runs_dir runs/a_runs_2d \
+  --epochs 200 \
+  --steps_per_epoch 588\
+  --batch_size 8 \
   --optimizer adam \
   --lr 3e-4 \
   --lr_scheduler cosine \
